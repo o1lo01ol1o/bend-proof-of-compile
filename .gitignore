@@ -1,0 +1,9 @@
+.devenv/
+.direnv/
+result
+result-*
+.claude/settings.local.json
+vendor/
+node_modules/
+dist/
+.bend-proof-cache/

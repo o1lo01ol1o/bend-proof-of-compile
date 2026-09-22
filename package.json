@@ -1,0 +1,18 @@
+{
+  "name": "bend-proof-of-compile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "proof-of-compile": "./src/cli.ts",
+    "poc": "./src/cli.ts"
+  },
+  "scripts": {
+    "check": "bun test && tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
