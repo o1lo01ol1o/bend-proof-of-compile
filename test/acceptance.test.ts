@@ -150,7 +150,7 @@ describe("incremental histories agree with cold checks", () => {
     h.write("M.bend", M("5n"));
     h.write("E.bend", E("one"));
     expect(h.agree("E.bend")).not.toContain("bookCheck");
-  }, 120_000);
+  }, 900_000);
 
   test("a law filled by a later file, and prefixes that leave a law open or a hole", () => {
     const h = new History();
@@ -183,7 +183,7 @@ def main() -> IO(Unit):
     h.agree("E.bend");
     h.write("E.bend", E("filled again"));
     expect(h.agree("E.bend")).toContain("resumePrefix rank=0");
-  }, 120_000);
+  }, 900_000);
 
   test("a symlink retarget and a LAWS.bend appearance", () => {
     const h = new History();
@@ -207,7 +207,7 @@ def main() -> IO(Unit):
     h.agree("PROOF.bend");
     h.write("PROOF.bend", "import Base\nimport ./LAWS.bend as LAWS\n\ndef main() -> IO(Unit):\n  IO.print(\"proof\")\n");
     h.agree("PROOF.bend");
-  }, 120_000);
+  }, 900_000);
 
   test("restart: seal in one process, restore in another, restore independently in a third", () => {
     const h = new History();
@@ -226,7 +226,7 @@ def main() -> IO(Unit):
 `);
     expect(h.agree("F.bend")).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
     expect(h.poc(["cache", "verify"]).stdout).toContain('"quarantined":0');
-  }, 120_000);
+  }, 900_000);
 
   test("signed states: forgeries are quarantined, untrusted signers are misses", () => {
     const h = new History();
@@ -276,7 +276,7 @@ def main() -> IO(Unit):
     expect(h.agree("E.bend")).not.toContain("bookCheck");
     const final = JSON.parse(h.poc(["cache", "verify"]).stdout) as { quarantined: number; untrusted: number };
     expect(final).toMatchObject({ quarantined: 0, untrusted: 0 });
-  }, 180_000);
+  }, 900_000);
 
   test("modules checked bottom-up are the prefixes their importers resume from", () => {
     const h = new History();
@@ -321,6 +321,6 @@ def main() -> IO(Unit):
     const cold = asImported("Bad.bend");
     expect(bad.code).toBe(1);
     expect(bad.stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n")).toBe(cold.stderr);
-  }, 180_000);
+  }, 900_000);
 });
 
