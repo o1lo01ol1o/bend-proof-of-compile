@@ -76,7 +76,7 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   promised capabilities).
 - `src/host-preload.ts` — `POC_HOST`: private cache root; CAS
   `objects/<aa>/<key>/{meta.json,state.bin|artifact.bin}` with SHA-256 storage
-  checksums (integrity only), metadata parsed at the boundary (schema 2: a
+  checksums (integrity only), metadata parsed at the boundary (schema 3, signed: a
   state's parent pack and its chain's foreign files; an artifact's report);
   quarantine on corruption; stages published parents first after Bend's
   stability check; GC roots and reachability GC.
