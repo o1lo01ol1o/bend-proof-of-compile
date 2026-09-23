@@ -172,6 +172,14 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   folding is ~0.7 s, sealing ~0.4 s (mostly the report summaries' walk of
   elaborations), the fill scan ~0.1 s.
 
+## Known history
+
+- `de8102f` (`poc check --module`) was pushed while its Nix build failed: two
+  acceptance histories hit the tests' 120 s limit under machine load
+  (timeouts, not disagreements). `2c5018f` raises the limit to 15 minutes;
+  a forced rebuild then passed all 17 tests, each history in 3–7 s. Skip
+  `de8102f` when bisecting with `nix build`.
+
 ## Bend-2 authoring gotchas (hard-won, will bite you)
 
 1. **No field access on data.** `node.key` is "not a defined name". You must
