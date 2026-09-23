@@ -46,17 +46,21 @@ function run(cmd: string[], cwd: string, env: Record<string, string>): Run {
   };
 }
 
-// A project directory with its own private cache.
+// A project directory with its own cache and its own signer (key and
+// trusted keys under `config`).
 class History {
+  readonly root: string;
   readonly dir: string;
   readonly cache: string;
+  signer: Record<string, string>;
 
   constructor() {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "poc-acceptance-"));
-    this.dir = path.join(root, "project");
-    this.cache = path.join(root, "cache");
+    this.root = fs.mkdtempSync(path.join(os.tmpdir(), "poc-acceptance-"));
+    this.dir = path.join(this.root, "project");
+    this.cache = path.join(this.root, "cache");
     fs.mkdirSync(this.dir);
     fs.mkdirSync(this.cache, { mode: 0o700 });
+    this.signer = { XDG_CONFIG_HOME: path.join(this.root, "config") };
   }
 
   write(file: string, text: string): void {
@@ -69,6 +73,7 @@ class History {
     return run([process.execPath, cli, ...args], this.dir, {
       TMPDIR: this.cache,
       POC_DEBUG: debug ? "1" : "0",
+      ...this.signer,
     });
   }
 
@@ -222,4 +227,55 @@ def main() -> IO(Unit):
     expect(h.agree("F.bend")).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
     expect(h.poc(["cache", "verify"]).stdout).toContain('"quarantined":0');
   }, 120_000);
+
+  test("signed states: forgeries are quarantined, untrusted signers are misses", () => {
+    const h = new History();
+    h.write("P.bend", P);
+    h.write("M.bend", M("5n"));
+    h.write("E.bend", E("signed"));
+    h.agree("E.bend");
+    const objects = path.join(h.cache, "bend-proof-of-compile", "v3", "objects");
+    const metas = (): string[] => fs.readdirSync(objects).flatMap((bucket) =>
+      fs.readdirSync(path.join(objects, bucket))
+        .filter((name) => !name.includes(".tmp-"))
+        .map((name) => path.join(objects, bucket, name, "meta.json")));
+
+    // A forger without the key rewrites a state's payload and its digest.
+    const target = metas().find((meta) => JSON.parse(fs.readFileSync(meta, "utf8")).kind === "state");
+    if (target === undefined) {
+      throw new Error("no state was stored");
+    }
+    const metadata = JSON.parse(fs.readFileSync(target, "utf8")) as Record<string, unknown>;
+    const payload = path.join(path.dirname(target), "state.bin");
+    const forged = Buffer.concat([fs.readFileSync(payload), Buffer.from([0])]);
+    fs.writeFileSync(payload, forged);
+    metadata.bytes = forged.byteLength;
+    metadata.payloadSha256 = new Bun.CryptoHasher("sha256").update(forged).digest("hex");
+    fs.writeFileSync(target, JSON.stringify(metadata));
+    const verified = JSON.parse(h.poc(["cache", "verify"]).stdout) as { quarantined: number; failures: string[] };
+    expect(verified.quarantined).toBe(1);
+    expect(verified.failures.join("\n")).toContain("signature does not verify");
+    h.agree("E.bend");
+
+    // A second signer whose trusted keys omit the first: every stored object
+    // is a miss, the check runs again, and its objects replace them.
+    const first = { ...h.signer };
+    h.signer = {
+      POC_SIGNING_KEY: path.join(h.root, "other", "key.pem"),
+      POC_TRUSTED_KEYS: path.join(h.root, "other", "trusted"),
+    };
+    expect(h.agree("E.bend")).toContain("resumePrefix miss");
+    expect(h.agree("E.bend")).not.toContain("bookCheck");
+
+    // Trusting the second signer's key makes its states the first's too.
+    const second = h.poc(["cache", "status"]);
+    expect(second.code).toBe(0);
+    const otherKey = run([process.execPath, path.join(import.meta.dir, "..", "src", "signer.ts"), "public"], h.dir, h.signer).stdout.trim();
+    h.signer = first;
+    run([process.execPath, path.join(import.meta.dir, "..", "src", "signer.ts"), "trust", otherKey], h.dir, h.signer);
+    expect(h.agree("E.bend")).not.toContain("bookCheck");
+    const final = JSON.parse(h.poc(["cache", "verify"]).stdout) as { quarantined: number; untrusted: number };
+    expect(final).toMatchObject({ quarantined: 0, untrusted: 0 });
+  }, 180_000);
 });
+

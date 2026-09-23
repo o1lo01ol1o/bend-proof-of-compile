@@ -68,8 +68,8 @@ type ResumeCandidate is Data:
 
 # Platform capabilities
 
-# The cache directory, which must be private to this user (the trust model:
-# a single-user store, trusted through file permissions).
+# The cache directory. Its objects are signed; only those signed by a trusted
+# key are read (trust option (b)).
 def Host.cache_root(namespace: String, version: String) -> IO(Result<&2, &2, String, String>):
   import "../foreign/host.c"
   import "../foreign/host.js"

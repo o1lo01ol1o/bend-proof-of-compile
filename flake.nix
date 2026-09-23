@@ -206,6 +206,8 @@
               runHook preInstallCheck
 
               export TMPDIR="$PWD/tmp"
+              # The signer creates its key and trusts it on first use.
+              export XDG_CONFIG_HOME="$TMPDIR/config"
               mkdir -p "$TMPDIR/project"
               cat > "$TMPDIR/project/A.bend" <<'EOF'
               import Base
@@ -267,6 +269,7 @@
               bun "$TMPDIR/laws.js" | grep -q 'law filled later'
 
               "$out/bin/proof-of-compile" cache verify | grep -q '"quarantined":0'
+              "$out/bin/proof-of-compile" cache verify | grep -q '"untrusted":0'
 
               runHook postInstallCheck
             '';

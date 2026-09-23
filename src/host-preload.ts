@@ -2,8 +2,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import { decodePack, encodePack, pathReal } from "./codec.ts";
+import {
+  reloadTrust,
+  statementText,
+  verifySignature,
+  type Signature,
+  type Statement,
+} from "./trust.ts";
 import {
   loadCompiler,
   type BookStateLike,
@@ -22,27 +30,11 @@ interface NamedBytes {
 
 // A state object is one pack; `foreigns` lists the foreign files named by
 // the records of its whole chain, so an artifact key can be derived without
-// restoring the state.
-type CasMetadata =
-  | {
-      readonly schema: 2;
-      readonly kind: "state";
-      readonly key: string;
-      readonly payloadSha256: string;
-      readonly bytes: number;
-      readonly parent: string | null;
-      readonly foreigns: readonly string[];
-    }
-  | {
-      readonly schema: 2;
-      readonly kind: "artifact";
-      readonly key: string;
-      readonly payloadSha256: string;
-      readonly bytes: number;
-      readonly reliant: readonly string[];
-    };
+// restoring the state. Every object's metadata is signed (trust option (b)):
+// the signature covers its statement, which includes the payload's digest.
+type CasMetadata = Statement & { readonly schema: 3; readonly signature: Signature };
 
-type CasKind = CasMetadata["kind"];
+type CasKind = Statement["kind"];
 
 interface StateRecord {
   readonly parent: string | null;
@@ -130,13 +122,10 @@ let memoizedInputs:
 
 globalThis.POC_HOST = {
   cacheRoot(namespace, version) {
-    const base = path.join(os.tmpdir(), safeSegment(namespace));
-    const root = path.join(base, safeSegment(version));
+    const root = path.join(os.tmpdir(), safeSegment(namespace), safeSegment(version));
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-    // Trust (single-user store): a content key names the inputs a state
-    // claims, not who produced it, so only this user may write the store.
-    assertPrivate(base);
-    assertPrivate(root);
+    // Integrity does not rest on who can write here: every object is signed,
+    // and only objects signed by a trusted key are read (trust option (b)).
     return root;
   },
 
@@ -198,12 +187,12 @@ globalThis.POC_HOST = {
     assertOpenStage(stage);
     try {
       // A pack is published after the packs it extends.
-      for (const entry of stage.entries) {
-        putCasObject(entry.cache, entry.key, fs.readFileSync(entry.payload), {
-          kind: "state",
-          record: entry.record,
-        });
-      }
+      putCasObjects(stage.entries.map((entry) => ({
+        cache: entry.cache,
+        key: entry.key,
+        payload: fs.readFileSync(entry.payload),
+        entry: { kind: "state", record: entry.record } as const,
+      })));
     } finally {
       closeStage(stage);
     }
@@ -278,7 +267,7 @@ globalThis.POC_HOST = {
       ? runtime.emit(state.book, target)
       : runtime.emitRestored(state, target);
     const payload = Buffer.from(source, "utf8");
-    putCasObject(cache, key, payload, { kind: "artifact", reliant });
+    putCasObjects([{ cache, key, payload, entry: { kind: "artifact", reliant } }]);
     atomicWrite(path.resolve(output), payload);
   },
 
@@ -293,15 +282,20 @@ globalThis.POC_HOST = {
     };
   },
 
+  // Every object: valid (signed by a trusted key, intact, decodable),
+  // untrusted (a valid signature by a key that is not trusted; left in place,
+  // never read), or quarantined.
   cacheVerify(cache) {
     let valid = 0;
+    let untrusted = 0;
     let quarantined = 0;
     const failures: string[] = [];
     for (const item of enumerateObjects(cache)) {
       try {
         const object = readCasObject(cache, item.key, item.kind);
         if (object === null) {
-          throw new Error("object disappeared during verification");
+          untrusted += 1;
+          continue;
         }
         if (item.kind === "state") {
           decodePack(runtime, object.payload).force();
@@ -313,7 +307,7 @@ globalThis.POC_HOST = {
         quarantined += 1;
       }
     }
-    return { root: cache, valid, quarantined, failures };
+    return { root: cache, valid, untrusted, quarantined, failures };
   },
 
   rootsPut(cache, root, live) {
@@ -527,20 +521,6 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-function assertPrivate(directory: string): void {
-  const stat = fs.lstatSync(directory);
-  const uid = process.getuid?.();
-  if (
-    !stat.isDirectory() ||
-    (uid !== undefined && stat.uid !== uid) ||
-    (stat.mode & 0o077) !== 0
-  ) {
-    throw new Error(
-      `cache directory ${directory} must be a directory owned by this user with mode 0700`,
-    );
-  }
-}
-
 function safeSegment(value: string): string {
   if (!/^[A-Za-z0-9._-]+$/.test(value)) {
     throw new Error(`unsafe cache path segment: ${value}`);
@@ -576,7 +556,7 @@ function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): Cas
   }
   const value = raw as Record<string, unknown>;
   if (
-    value.schema !== 2 ||
+    value.schema !== 3 ||
     value.kind !== expectedKind ||
     value.key !== key ||
     typeof value.bytes !== "number" ||
@@ -587,7 +567,17 @@ function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): Cas
   ) {
     return invalid();
   }
-  const common = { schema: 2, key, payloadSha256: value.payloadSha256, bytes: value.bytes } as const;
+  const signature = value.signature as { key?: unknown; sig?: unknown } | null | undefined;
+  if (typeof signature?.key !== "string" || typeof signature.sig !== "string") {
+    return invalid();
+  }
+  const common = {
+    schema: 3,
+    key,
+    payloadSha256: value.payloadSha256,
+    bytes: value.bytes,
+    signature: { key: signature.key, sig: signature.sig },
+  } as const;
   if (expectedKind === "artifact") {
     const reliant = value.reliant;
     if (!Array.isArray(reliant) || !reliant.every((name): name is string => typeof name === "string")) {
@@ -620,12 +610,20 @@ function objectKind(cache: string, key: string): CasKind | null {
   }
 }
 
+// An object's verified metadata: null when there is none or its signer is not
+// trusted (a miss, left in place); an error when it is malformed or its
+// signature does not verify (the caller quarantines it).
 function readCasMetadata(cache: string, key: string, kind: CasKind): CasMetadata | null {
   const metadataPath = path.join(objectDirectory(cache, key), "meta.json");
   if (!fs.existsSync(metadataPath)) {
     return null;
   }
-  return parseCasMetadata(JSON.parse(fs.readFileSync(metadataPath, "utf8")), key, kind);
+  const metadata = parseCasMetadata(JSON.parse(fs.readFileSync(metadataPath, "utf8")), key, kind);
+  const verdict = verifySignature(metadata, metadata.signature);
+  if (verdict === "invalid") {
+    throw new Error("CAS signature does not verify");
+  }
+  return verdict === "trusted" ? metadata : null;
 }
 
 function readCasObject(
@@ -661,42 +659,95 @@ function readCasObject(
     : { payload, reliant: metadata.reliant };
 }
 
-function putCasObject(
-  cache: string,
-  key: string,
-  payload: Uint8Array,
-  entry: CasEntry,
-): void {
-  const directory = objectDirectory(cache, key);
-  if (fs.existsSync(path.join(directory, "meta.json"))) {
-    const existing = readCasObject(cache, key, entry.kind);
-    if (existing === null || !existing.payload.equals(payload)) {
-      throw new Error(`immutable CAS collision at ${key}`);
-    }
-    return;
-  }
+interface Publication {
+  readonly cache: string;
+  readonly key: string;
+  readonly payload: Uint8Array;
+  readonly entry: CasEntry;
+}
 
-  const parent = path.dirname(directory);
-  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+// The signer (src/signer.ts) signs every statement in one call; it is the
+// only process that reads the signing key.
+const signerProgram = fileURLToPath(new URL("./signer.ts", import.meta.url));
+
+function signStatements(statements: readonly Statement[]): Signature[] {
+  if (statements.length === 0) {
+    return [];
+  }
+  const child = Bun.spawnSync({
+    cmd: [process.execPath, signerProgram, "sign"],
+    stdin: Buffer.from(JSON.stringify({ statements: statements.map(statementText) }), "utf8"),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (child.exitCode !== 0) {
+    throw new Error(`the signer failed: ${child.stderr.toString().trim()}`);
+  }
+  const signed = JSON.parse(child.stdout.toString()) as { key?: unknown; signatures?: unknown };
+  const signatures = signed.signatures;
+  if (
+    typeof signed.key !== "string" ||
+    !Array.isArray(signatures) ||
+    signatures.length !== statements.length ||
+    !signatures.every((sig): sig is string => typeof sig === "string")
+  ) {
+    throw new Error("the signer returned a malformed answer");
+  }
+  // A first signature may have created the key and trusted it.
+  reloadTrust();
+  const key = signed.key;
+  return signatures.map((sig) => ({ key, sig }));
+}
+
+// Publishes objects in order (a pack after the packs it extends). An object
+// already present under a key must hold the same payload; one whose signer is
+// not trusted, or whose signature does not verify, is replaced.
+function putCasObjects(publications: readonly Publication[]): void {
+  const pending = publications.filter((publication) => {
+    const directory = objectDirectory(publication.cache, publication.key);
+    if (!fs.existsSync(path.join(directory, "meta.json"))) {
+      return true;
+    }
+    let existing: { readonly payload: Buffer } | null;
+    try {
+      existing = readCasObject(publication.cache, publication.key, publication.entry.kind);
+    } catch (error) {
+      quarantine(publication.cache, publication.key, error);
+      return true;
+    }
+    if (existing === null) {
+      quarantine(publication.cache, publication.key, "signed by a key that is not trusted");
+      return true;
+    }
+    if (!existing.payload.equals(publication.payload)) {
+      throw new Error(`immutable CAS collision at ${publication.key}`);
+    }
+    return false;
+  });
+  const statements: Statement[] = pending.map(({ key, payload, entry }) => {
+    const common = { key, payloadSha256: sha256(payload), bytes: payload.byteLength };
+    return entry.kind === "state"
+      ? { ...common, kind: "state", parent: entry.record.parent, foreigns: entry.record.foreigns }
+      : { ...common, kind: "artifact", reliant: entry.reliant };
+  });
+  const signatures = signStatements(statements);
+  pending.forEach((publication, index) => {
+    const statement = statements[index] as Statement;
+    const signature = signatures[index] as Signature;
+    writeCasObject(publication, { ...statement, schema: 3, signature });
+  });
+}
+
+function writeCasObject(publication: Publication, metadata: CasMetadata): void {
+  const { cache, key, payload, entry } = publication;
+  const directory = objectDirectory(cache, key);
+  fs.mkdirSync(path.dirname(directory), { recursive: true, mode: 0o700 });
   const temporary = `${directory}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   fs.mkdirSync(temporary, { mode: 0o700 });
   try {
     const body = Buffer.from(payload);
     fs.writeFileSync(path.join(temporary, payloadName(entry.kind)), body, { mode: 0o600 });
-    const common = {
-      schema: 2,
-      key,
-      payloadSha256: sha256(body),
-      bytes: body.byteLength,
-    } as const;
-    const metadata: CasMetadata = entry.kind === "state"
-      ? { ...common, kind: "state", parent: entry.record.parent, foreigns: entry.record.foreigns }
-      : { ...common, kind: "artifact", reliant: entry.reliant };
-    fs.writeFileSync(
-      path.join(temporary, "meta.json"),
-      `${JSON.stringify(metadata)}\n`,
-      { mode: 0o600 },
-    );
+    fs.writeFileSync(path.join(temporary, "meta.json"), `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
     try {
       fs.renameSync(temporary, directory);
     } catch (error) {
@@ -748,26 +799,27 @@ function quarantine(cache: string, key: string, reason: unknown): void {
   }
 }
 
-function enumerateObjects(cache: string): Array<CasMetadata> {
+// Every object in the store, trusted or not, by its declared kind and size
+// (what status, GC and verify walk; reads verify).
+function enumerateObjects(cache: string): Array<{ readonly key: string; readonly kind: CasKind; readonly bytes: number }> {
   const root = path.join(cache, "objects");
   if (!fs.existsSync(root)) {
     return [];
   }
-  const result: CasMetadata[] = [];
+  const result: Array<{ key: string; kind: CasKind; bytes: number }> = [];
   for (const file of walkFiles(root)) {
     if (path.basename(file) !== "meta.json") {
       continue;
     }
     const key = path.basename(path.dirname(file));
-    try {
-      const kind = objectKind(cache, key);
-      const metadata = kind === null ? null : readCasMetadata(cache, key, kind);
-      if (metadata !== null) {
-        result.push(metadata);
-      }
-    } catch {
-      // A malformed object is not listed; a read of its key quarantines it.
+    const kind = objectKind(cache, key);
+    if (kind === null || !/^[0-9a-f]{64}$/.test(key)) {
+      continue;
     }
+    const bytes = fs.readdirSync(path.dirname(file))
+      .filter((name) => name !== "meta.json")
+      .reduce((total, name) => total + fs.statSync(path.join(path.dirname(file), name)).size, 0);
+    result.push({ key, kind, bytes });
   }
   return result;
 }

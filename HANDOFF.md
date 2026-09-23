@@ -3,8 +3,9 @@
 Status: **`SPEC-incremental-compilation.md` milestones 1–7 are in**, including
 the decided next step of compilation after restore (5): re-elaborate what
 `main` reaches, through a replay filter in the fork (`16379eb7`, local until
-pushed; see the spec's last section). Open: trust (b) and the proof scope.
-Decided and recorded: keep pure-Bend hashing and accept its cost. `nix build .#proof-of-compile` runs the codec laws and golden vectors,
+pushed; see the spec's last section), and trust option (b), signed states.
+Open: the proof scope. Decided and recorded: keep pure-Bend hashing and accept
+its cost. `nix build .#proof-of-compile` runs the codec laws and golden vectors,
 the hash against Node's, incremental histories against the pinned checker's
 CLI, and an install check.
 
@@ -16,7 +17,8 @@ order with each file's realpath, namespace and text) is folded into Merkle
 keys; an artifact's key adds the target and the foreign files the checked
 records name. A hit means the state or artifact was produced from exactly
 those inputs. States and artifacts live in a content-addressed store under
-`$TMPDIR/bend-proof-of-compile/v2`, which must be private to the user.
+`$TMPDIR/bend-proof-of-compile/v3`; every object is signed, and only objects
+signed by a trusted Ed25519 key are read.
 
 The checked state after the first k files of an entry's load order is keyed
 `P_k` (`P_0` = the compiler key, `P_k = Load.snoc(P_(k-1), step k)`), so any
@@ -89,6 +91,11 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
 - `src/codec.ts` — packs (schema 3): a sealed boundary's own records without
   elaborations, with reference summaries; canonical; lazy restore through
   accessor properties; summaries readable without raising.
+- `src/trust.ts` — statements, public key names, verification; key paths
+  (`POC_SIGNING_KEY`, `POC_TRUSTED_KEYS`, default under
+  `$XDG_CONFIG_HOME/bend-proof-of-compile/`).
+- `src/signer.ts` — the signer: the only reader of the private key (`sign`,
+  `public`, `trust KEY`); never loads the checker or program code.
 - `src/build-bend-lib.ts` — builds `dist/app-lib.js`.
 
 ### Tests and tools
@@ -119,7 +126,10 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   (2,870 checks and 1,888 emits, 0 disagreements); so do bend-categories's
   tests, `PROOF.bend` and both benchmarks (40 checks, 12 emits).
 - GC keeps each root's chain and artifact and removes the rest; `verify` stays
-  clean; a non-private cache directory fails every command.
+  clean. Signed states: a forged payload (digest recomputed) is quarantined; a
+  second signer's objects are misses until its key is trusted, then used
+  (`test/acceptance.test.ts`); signing costs one ~10 ms signer call per
+  publication.
 - `bend-categories` heavy benchmark (`HeavyBenchmark.bend` over
   `Setoids.Unsafe.bend`: 50 files, 955 KB), with another session's checker
   holding a core:
@@ -237,7 +247,8 @@ boundary, the remaining groups and steps, and whether the check was seeded.
 1. **Push fork `16379eb7`** (book_valid's replay) to
    `o1lo01ol1o/bend/expose-book-state-api`, point `bend-src` back at GitHub,
    and `nix flake update bend-src`.
-2. **Trust (b):** signatures from a signer process that never evaluates code.
+2. **Trust beyond (b):** the signer runs as the user, so local code as that
+   user can sign; a separate-user signer daemon would close that.
 3. Hashing throughput is decided (keep the rule; ~0.6 s/MB of source per
    build); revisit only with a faster Bend SHA-256.
 4. **Report duplication:** export a summary-parameterised `cli_report` from
