@@ -2,13 +2,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { fileURLToPath } from "node:url";
 
-import { decodeBookState, encodeBookState } from "./codec.ts";
+import { decodePack, encodePack, pathReal } from "./codec.ts";
 import {
   loadCompiler,
   type BookStateLike,
-  type CompilerRuntime,
+  type CheckGroup,
+  type LateFill,
+  type LoadOrder,
+  type LoadStep,
+  type Target,
+  type Verdict,
 } from "./compiler.ts";
 
 interface NamedBytes {
@@ -16,23 +20,50 @@ interface NamedBytes {
   readonly bytes: string;
 }
 
-interface CasMetadata {
-  readonly schema: 1;
-  readonly kind: "state" | "artifact";
-  readonly key: string;
-  readonly payloadSha256: string;
-  readonly bytes: number;
-}
+// A state object is one pack; `foreigns` lists the foreign files named by
+// the records of its whole chain, so an artifact key can be derived without
+// restoring the state.
+type CasMetadata =
+  | {
+      readonly schema: 2;
+      readonly kind: "state";
+      readonly key: string;
+      readonly payloadSha256: string;
+      readonly bytes: number;
+      readonly parent: string | null;
+      readonly foreigns: readonly string[];
+    }
+  | {
+      readonly schema: 2;
+      readonly kind: "artifact";
+      readonly key: string;
+      readonly payloadSha256: string;
+      readonly bytes: number;
+      readonly reliant: readonly string[];
+    };
 
-interface CompileStep {
-  readonly file: string;
-  readonly namespace: string;
-  readonly key: string;
+type CasKind = CasMetadata["kind"];
+
+interface StateRecord {
+  readonly parent: string | null;
+  readonly foreigns: readonly string[];
 }
 
 interface ResumeCandidate {
   readonly key: string;
-  readonly steps: readonly CompileStep[];
+  readonly groups: readonly CheckGroup[];
+}
+
+// A restored or checked state, with what its packs need (the key it is
+// stored under and the foreign files its chain names), `n0`, where its last
+// file's claims begin, and whether every record carries its elaboration:
+// only a state checked from nothing in this process does, and only such a
+// state is emitted directly.
+interface HeldState extends BookStateLike {
+  readonly key: string;
+  readonly foreigns: readonly string[];
+  readonly n0: number;
+  readonly elaborations: "complete" | "restored";
 }
 
 interface StateStage {
@@ -41,6 +72,7 @@ interface StateStage {
     readonly cache: string;
     readonly key: string;
     readonly payload: string;
+    readonly record: StateRecord;
   }>;
   closed: boolean;
 }
@@ -48,35 +80,37 @@ interface StateStage {
 interface HostApi {
   cacheRoot(namespace: string, version: string): string;
   compilerInputs(): { compiler: readonly NamedBytes[]; hashes: readonly NamedBytes[] };
-  defaultBase(): string;
-  realpath(file: string): string;
-  resolve(owner: string, specifier: string): string;
-  readSource(file: string): { text: string; lines: readonly string[]; bytes: string };
-  stateGet(cache: string, key: string): BookStateLike | null;
+  loadSteps(entry: string): Promise<LoadOrder>;
+  loadFills(root: string, steps: readonly LoadStep[]): Promise<LateFill[]>;
+  stateGet(cache: string, key: string): { readonly state: HeldState; readonly verdict: Verdict } | null;
   stateGetLongest(
     cache: string,
     candidates: readonly ResumeCandidate[],
-  ): { readonly state: BookStateLike; readonly steps: readonly CompileStep[] } | null;
+  ): { readonly state: HeldState; readonly groups: readonly CheckGroup[] } | null;
+  stateForeigns(cache: string, key: string): readonly NamedBytes[] | null;
   stageStart(): StateStage;
   stageCommit(stage: StateStage): void;
   stageAbort(stage: StateStage): void;
-  bookReadSuffix(
+  bookCheck(
     cache: string,
-    entry: string,
-    stateKey: string,
-    steps: readonly CompileStep[],
-    seed: BookStateLike | undefined,
+    root: string,
+    groups: readonly CheckGroup[],
+    seed: HeldState | undefined,
     stage: StateStage,
-  ): { readonly state: BookStateLike; readonly stage: StateStage };
-  artifactRestore(cache: string, key: string, output: string): boolean;
+  ): Promise<{ readonly state: HeldState; readonly stage: StateStage; readonly verdict: Verdict }>;
+  outputPath(output: string): { readonly real: string; readonly directory: boolean };
+  artifactRestore(cache: string, key: string, output: string): readonly string[] | null;
   outputRemove(output: string): void;
   artifactBuild(
     cache: string,
     key: string,
     output: string,
-    target: string,
-    state: BookStateLike,
+    target: Target,
+    state: HeldState,
+    reliant: readonly string[],
   ): void;
+  rootsPut(cache: string, root: string, live: readonly string[]): void;
+  rootsLive(cache: string): readonly string[];
   cacheStatus(cache: string): object;
   cacheVerify(cache: string): object;
   cacheGc(cache: string, live: readonly string[]): object;
@@ -90,17 +124,19 @@ declare global {
 const bend2Source = requiredEnvironment("POC_BEND2_SOURCE");
 const hashesSource = requiredEnvironment("POC_HASHES_SOURCE");
 const runtime = await loadCompiler(bend2Source);
-const compilerWorker = fileURLToPath(new URL("./compiler-worker.ts", import.meta.url));
 let memoizedInputs:
   | { compiler: readonly NamedBytes[]; hashes: readonly NamedBytes[] }
   | undefined;
 
 globalThis.POC_HOST = {
   cacheRoot(namespace, version) {
-    const safeNamespace = safeSegment(namespace);
-    const safeVersion = safeSegment(version);
-    const root = path.join(os.tmpdir(), safeNamespace, safeVersion);
+    const base = path.join(os.tmpdir(), safeSegment(namespace));
+    const root = path.join(base, safeSegment(version));
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    // Trust (single-user store): a content key names the inputs a state
+    // claims, not who produced it, so only this user may write the store.
+    assertPrivate(base);
+    assertPrivate(root);
     return root;
   },
 
@@ -112,44 +148,42 @@ globalThis.POC_HOST = {
     return memoizedInputs;
   },
 
-  defaultBase() {
-    return runtime.baseFile;
+  loadSteps(entry) {
+    return runtime.loadSteps(entry);
   },
 
-  realpath(file) {
-    return fs.realpathSync(path.resolve(file));
-  },
-
-  resolve(owner, specifier) {
-    return path.resolve(path.dirname(owner), specifier);
-  },
-
-  readSource(file) {
-    const bytes = fs.readFileSync(file);
-    const text = bytes.toString("utf8");
-    return { text, lines: text.split("\n"), bytes: bytes.toString("base64") };
+  loadFills(root, steps) {
+    return runtime.loadFills(root, steps);
   },
 
   stateGet(cache, key) {
-    return readState(cache, key);
+    const state = readState(cache, key);
+    return state === null ? null : { state, verdict: runtime.verdict(state, state.n0) };
   },
 
   stateGetLongest(cache, candidates) {
     for (const [index, candidate] of candidates.entries()) {
       const state = readState(cache, candidate.key);
       if (state !== null) {
-        if (process.env.POC_DEBUG === "1") {
-          process.stderr.write(
-            `[poc-host] resumePrefix rank=${index} remainingSteps=${candidate.steps.length}\n`,
-          );
-        }
-        return { state, steps: candidate.steps };
+        debug(
+          `resumePrefix rank=${index} remainingGroups=${candidate.groups.length} ` +
+            `remainingSteps=${stepCount(candidate.groups)}`,
+        );
+        return { state, groups: candidate.groups };
       }
     }
-    if (process.env.POC_DEBUG === "1") {
-      process.stderr.write("[poc-host] resumePrefix miss\n");
-    }
+    debug("resumePrefix miss");
     return null;
+  },
+
+  stateForeigns(cache, key) {
+    const record = readStateRecord(cache, key);
+    return record === null
+      ? null
+      : record.foreigns.map((file) => ({
+          path: file,
+          bytes: fs.readFileSync(file).toString("base64"),
+        }));
   },
 
   stageStart() {
@@ -163,13 +197,12 @@ globalThis.POC_HOST = {
   stageCommit(stage) {
     assertOpenStage(stage);
     try {
+      // A pack is published after the packs it extends.
       for (const entry of stage.entries) {
-        putCasObject(
-          entry.cache,
-          entry.key,
-          "state",
-          fs.readFileSync(entry.payload),
-        );
+        putCasObject(entry.cache, entry.key, fs.readFileSync(entry.payload), {
+          kind: "state",
+          record: entry.record,
+        });
       }
     } finally {
       closeStage(stage);
@@ -182,24 +215,31 @@ globalThis.POC_HOST = {
     }
   },
 
-  bookReadSuffix(cache, entry, stateKey, steps, seed, stage) {
+  async bookCheck(cache, root, groups, seed, stage) {
     assertOpenStage(stage);
-    if (process.env.POC_DEBUG === "1") {
-      process.stderr.write(
-        `[poc-host] compileSuffix steps=${steps.length} seeded=${seed !== undefined}\n`,
-      );
-    }
+    debug(
+      `check groups=${groups.length} steps=${stepCount(groups)} seeded=${seed !== undefined}`,
+    );
     try {
-      let state = seed;
-      for (const step of steps) {
-        const checked = runBookRead(step.file, step.namespace, state);
-        state = { book: checked.book, seen: checked.seen };
-        stageState(stage, cache, step.key, state);
+      const keys = new Map<BookStateLike, HeldState>();
+      if (seed !== undefined) {
+        keys.set(seed, seed);
       }
-      const checked = runBookRead(entry, "", state);
-      const finalState = { book: checked.book, seen: checked.seen };
-      stageState(stage, cache, stateKey, finalState);
-      return { state: finalState, stage };
+      const elaborations = seed === undefined ? "complete" : "restored";
+      const checked = await runtime.check(root, groups, seed, (key, parent, child, last) => {
+        const held = keys.get(parent);
+        const foreigns = mergeForeigns(held?.foreigns ?? [], ownForeigns(child));
+        stageState(stage, cache, key, encodePack(runtime, held?.key ?? null, parent, child, last), {
+          parent: held?.key ?? null,
+          foreigns,
+        });
+        keys.set(child, { ...child, key, foreigns, n0: last, elaborations });
+      });
+      const state = keys.get(checked.state);
+      if (state === undefined || state === seed) {
+        throw new Error("a check plan must have at least one group");
+      }
+      return { state, stage, verdict: runtime.verdict(state, state.n0) };
     } catch (error) {
       if (!stage.closed) {
         closeStage(stage);
@@ -208,18 +248,23 @@ globalThis.POC_HOST = {
     }
   },
 
+  outputPath(output) {
+    const real = pathReal(output);
+    return { real, directory: fs.existsSync(real) && fs.statSync(real).isDirectory() };
+  },
+
   artifactRestore(cache, key, output) {
     assertDigest(key);
     try {
-      const payload = readCasObject(cache, key, "artifact");
-      if (payload === null) {
-        return false;
+      const artifact = readCasObject(cache, key, "artifact");
+      if (artifact === null) {
+        return null;
       }
-      atomicWrite(path.resolve(output), payload);
-      return true;
+      atomicWrite(path.resolve(output), artifact.payload);
+      return artifact.reliant;
     } catch (error) {
       quarantine(cache, key, error);
-      return false;
+      return null;
     }
   },
 
@@ -227,15 +272,13 @@ globalThis.POC_HOST = {
     fs.rmSync(path.resolve(output), { force: true });
   },
 
-  artifactBuild(cache, key, output, target, state) {
+  artifactBuild(cache, key, output, target, state, reliant) {
     assertDigest(key);
-    const source = target === "js"
-      ? runtime.compileJs(state.book)
-      : target === "c"
-        ? runtime.compileC(state.book)
-        : fail(`unsupported target: ${target}`);
+    const source = state.elaborations === "complete"
+      ? runtime.emit(state.book, target)
+      : runtime.emitRestored(state, target);
     const payload = Buffer.from(source, "utf8");
-    putCasObject(cache, key, "artifact", payload);
+    putCasObject(cache, key, payload, { kind: "artifact", reliant });
     atomicWrite(path.resolve(output), payload);
   },
 
@@ -256,12 +299,12 @@ globalThis.POC_HOST = {
     const failures: string[] = [];
     for (const item of enumerateObjects(cache)) {
       try {
-        const payload = readCasObject(cache, item.key, item.kind);
-        if (payload === null) {
+        const object = readCasObject(cache, item.key, item.kind);
+        if (object === null) {
           throw new Error("object disappeared during verification");
         }
         if (item.kind === "state") {
-          decodeBookState(runtime, payload);
+          decodePack(runtime, object.payload).force();
         }
         valid += 1;
       } catch (error) {
@@ -273,11 +316,52 @@ globalThis.POC_HOST = {
     return { root: cache, valid, quarantined, failures };
   },
 
+  rootsPut(cache, root, live) {
+    assertDigest(root);
+    live.forEach(assertDigest);
+    atomicWrite(path.join(cache, "roots", `${root}.json`), Buffer.from(
+      `${JSON.stringify({ schema: 1, live: [...live] })}\n`,
+      "utf8",
+    ));
+  },
+
+  rootsLive(cache) {
+    const directory = path.join(cache, "roots");
+    const live = new Set<string>();
+    for (const file of fs.existsSync(directory) ? fs.readdirSync(directory) : []) {
+      if (!/^[0-9a-f]{64}\.json$/.test(file)) {
+        continue;
+      }
+      const record = JSON.parse(fs.readFileSync(path.join(directory, file), "utf8")) as unknown;
+      const keys = (record as { schema?: unknown; live?: unknown } | null);
+      if (keys?.schema !== 1 || !Array.isArray(keys.live)) {
+        throw new Error(`invalid GC root ${file}`);
+      }
+      for (const key of keys.live) {
+        if (typeof key !== "string" || !/^[0-9a-f]{64}$/.test(key)) {
+          throw new Error(`invalid GC root ${file}`);
+        }
+        live.add(key);
+      }
+    }
+    return [...live];
+  },
+
   cacheGc(cache, live) {
-    // Until durable build manifests are introduced, absence from `live` is not
-    // proof of unreachability. GC therefore removes only abandoned temp files;
-    // it never guesses that a valid immutable object is dead.
-    const liveSet = new Set(live);
+    // Reachability: a live state keeps its whole chain of packs; a live
+    // artifact keeps itself. Every other object, and every abandoned temporary
+    // file, is removed. A build racing GC can lose a parent it was about to
+    // extend; its chain then fails to restore, which is a miss, never a
+    // wrong state.
+    const reachable = new Set<string>();
+    for (const key of live) {
+      assertDigest(key);
+      for (let cursor: string | null = key; cursor !== null && !reachable.has(cursor);) {
+        reachable.add(cursor);
+        const kind = objectKind(cache, cursor);
+        cursor = kind === "state" ? readStateRecord(cache, cursor)?.parent ?? null : null;
+      }
+    }
     let removedTemporary = 0;
     for (const file of walkFiles(cache)) {
       if (path.basename(file).includes(".tmp-")) {
@@ -285,12 +369,22 @@ globalThis.POC_HOST = {
         removedTemporary += 1;
       }
     }
+    let removedObjects = 0;
+    let removedBytes = 0;
+    for (const item of enumerateObjects(cache)) {
+      if (!reachable.has(item.key)) {
+        fs.rmSync(objectDirectory(cache, item.key), { recursive: true, force: true });
+        removedObjects += 1;
+        removedBytes += item.bytes;
+      }
+    }
     return {
       root: cache,
-      liveKeys: liveSet.size,
+      liveKeys: live.length,
+      reachable: reachable.size,
+      removedObjects,
+      removedBytes,
       removedTemporary,
-      removedObjects: 0,
-      conservative: true,
     };
   },
 };
@@ -311,74 +405,107 @@ if (process.env.POC_DEBUG === "1" && globalThis.POC_HOST !== undefined) {
   }) as HostApi;
 }
 
-function readState(cache: string, key: string): BookStateLike | null {
+function debug(line: string): void {
+  if (process.env.POC_DEBUG === "1") {
+    process.stderr.write(`[poc-host] ${line}\n`);
+  }
+}
+
+function stepCount(groups: readonly CheckGroup[]): number {
+  return groups.reduce((total, group) => total + group.steps.length, 0);
+}
+
+// Restores the chain of packs ending at `key` into one flat book. A missing
+// or corrupt link makes the state absent; a corrupt one is quarantined.
+function readState(cache: string, key: string): HeldState | null {
+  assertDigest(key);
+  const chain: Array<{ key: string; payload: Buffer; record: StateRecord }> = [];
+  let cursor: string | null = key;
+  try {
+    while (cursor !== null) {
+      const object: { readonly payload: Buffer; readonly record: StateRecord } | null = readCasObject(cache, cursor, "state");
+      if (object === null) {
+        return null;
+      }
+      chain.push({ key: cursor, payload: object.payload, record: object.record });
+      cursor = object.record.parent;
+      if (chain.length > 100_000) {
+        throw new Error("state chain does not end");
+      }
+    }
+  } catch (error) {
+    quarantine(cache, cursor ?? key, error);
+    return null;
+  }
+  const state: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
+  let headLast = 0;
+  for (const link of chain.reverse()) {
+    try {
+      const pack = decodePack(runtime, link.payload);
+      if (pack.parent !== link.record.parent) {
+        throw new Error("pack parent disagrees with its metadata");
+      }
+      pack.apply(state);
+      headLast = pack.last;
+    } catch (error) {
+      quarantine(cache, link.key, error);
+      return null;
+    }
+  }
+  const head = chain[chain.length - 1];
+  return {
+    ...state,
+    key,
+    foreigns: head?.record.foreigns ?? [],
+    n0: headLast,
+    elaborations: "restored",
+  };
+}
+
+function readStateRecord(cache: string, key: string): StateRecord | null {
   assertDigest(key);
   try {
-    const payload = readCasObject(cache, key, "state");
-    return payload === null ? null : decodeBookState(runtime, payload);
+    const metadata = readCasMetadata(cache, key, "state");
+    return metadata?.kind === "state"
+      ? { parent: metadata.parent, foreigns: metadata.foreigns }
+      : null;
   } catch (error) {
     quarantine(cache, key, error);
     return null;
   }
 }
 
+// The foreign files a pack's own records name, as absolute paths.
+function ownForeigns(state: BookStateLike): string[] {
+  const files: string[] = [];
+  for (const name of Object.keys(state.book.tlds)) {
+    const tld = state.book.tlds[name];
+    if (tld?.$ === "Def" && tld.i !== undefined) {
+      files.push(...tld.i.map(pathReal));
+    }
+  }
+  return files;
+}
+
+function mergeForeigns(inherited: readonly string[], own: readonly string[]): string[] {
+  return [...new Set([...inherited, ...own])].sort();
+}
+
 function stageState(
   stage: StateStage,
   cache: string,
   key: string,
-  state: BookStateLike,
+  payload: Buffer,
+  record: StateRecord,
 ): void {
   assertOpenStage(stage);
   assertDigest(key);
   if (stage.entries.some((entry) => entry.key === key)) {
     throw new Error(`checkpoint key staged twice: ${key}`);
   }
-  const payload = path.join(stage.directory, `${stage.entries.length}.bin`);
-  fs.writeFileSync(payload, encodeBookState(runtime, state), { mode: 0o600 });
-  stage.entries.push({ cache, key, payload });
-}
-
-function runBookRead(
-  file: string,
-  namespace: string,
-  seed?: BookStateLike,
-): BookStateLike & { readonly n0: number } {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "poc-check-"));
-  const seedPath = seed === undefined ? "-" : path.join(temporary, "seed.bin");
-  const outputPath = path.join(temporary, "checked.bin");
-  const n0Path = path.join(temporary, "n0.txt");
-  try {
-    if (seed !== undefined) {
-      fs.writeFileSync(seedPath, encodeBookState(runtime, seed));
-    }
-    const child = Bun.spawnSync({
-      cmd: [
-        process.execPath,
-        compilerWorker,
-        bend2Source,
-        file,
-        namespace,
-        seedPath,
-        outputPath,
-        n0Path,
-      ],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    if (child.exitCode !== 0) {
-      const stderr = child.stderr.toString().trim();
-      const stdout = child.stdout.toString().trim();
-      throw new Error(stderr.length > 0 ? stderr : stdout || "Bend checker failed");
-    }
-    const checked = decodeBookState(runtime, fs.readFileSync(outputPath));
-    const n0 = Number(fs.readFileSync(n0Path, "utf8").trim());
-    if (!Number.isSafeInteger(n0) || n0 < 0) {
-      throw new Error("compiler worker returned an invalid n0 marker");
-    }
-    return { ...checked, n0 };
-  } finally {
-    fs.rmSync(temporary, { recursive: true, force: true });
-  }
+  const file = path.join(stage.directory, `${stage.entries.length}.bin`);
+  fs.writeFileSync(file, payload, { mode: 0o600 });
+  stage.entries.push({ cache, key, payload: file, record });
 }
 
 function assertOpenStage(stage: StateStage): void {
@@ -400,6 +527,20 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
+function assertPrivate(directory: string): void {
+  const stat = fs.lstatSync(directory);
+  const uid = process.getuid?.();
+  if (
+    !stat.isDirectory() ||
+    (uid !== undefined && stat.uid !== uid) ||
+    (stat.mode & 0o077) !== 0
+  ) {
+    throw new Error(
+      `cache directory ${directory} must be a directory owned by this user with mode 0700`,
+    );
+  }
+}
+
 function safeSegment(value: string): string {
   if (!/^[A-Za-z0-9._-]+$/.test(value)) {
     throw new Error(`unsafe cache path segment: ${value}`);
@@ -418,48 +559,118 @@ function objectDirectory(cache: string, key: string): string {
   return path.join(cache, "objects", key.slice(0, 2), key);
 }
 
-function payloadName(kind: CasMetadata["kind"]): string {
+function payloadName(kind: CasKind): string {
   return kind === "state" ? "state.bin" : "artifact.bin";
+}
+
+type CasEntry =
+  | { readonly kind: "state"; readonly record: StateRecord }
+  | { readonly kind: "artifact"; readonly reliant: readonly string[] };
+
+function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): CasMetadata {
+  const invalid = (): never => {
+    throw new Error("invalid CAS metadata");
+  };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return invalid();
+  }
+  const value = raw as Record<string, unknown>;
+  if (
+    value.schema !== 2 ||
+    value.kind !== expectedKind ||
+    value.key !== key ||
+    typeof value.bytes !== "number" ||
+    !Number.isSafeInteger(value.bytes) ||
+    value.bytes < 0 ||
+    typeof value.payloadSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.payloadSha256)
+  ) {
+    return invalid();
+  }
+  const common = { schema: 2, key, payloadSha256: value.payloadSha256, bytes: value.bytes } as const;
+  if (expectedKind === "artifact") {
+    const reliant = value.reliant;
+    if (!Array.isArray(reliant) || !reliant.every((name): name is string => typeof name === "string")) {
+      return invalid();
+    }
+    return { ...common, kind: "artifact", reliant };
+  }
+  const parent = value.parent;
+  const foreigns = value.foreigns;
+  if (
+    !(parent === null || (typeof parent === "string" && /^[0-9a-f]{64}$/.test(parent))) ||
+    !Array.isArray(foreigns) ||
+    !foreigns.every((file): file is string => typeof file === "string" && path.isAbsolute(file))
+  ) {
+    return invalid();
+  }
+  return { ...common, kind: "state", parent, foreigns };
+}
+
+// The kind an object's metadata declares, or null when there is no object
+// (or no readable kind: a read of it by kind quarantines it).
+function objectKind(cache: string, key: string): CasKind | null {
+  try {
+    const raw = JSON.parse(
+      fs.readFileSync(path.join(objectDirectory(cache, key), "meta.json"), "utf8"),
+    ) as { kind?: unknown } | null;
+    return raw?.kind === "state" || raw?.kind === "artifact" ? raw.kind : null;
+  } catch {
+    return null;
+  }
+}
+
+function readCasMetadata(cache: string, key: string, kind: CasKind): CasMetadata | null {
+  const metadataPath = path.join(objectDirectory(cache, key), "meta.json");
+  if (!fs.existsSync(metadataPath)) {
+    return null;
+  }
+  return parseCasMetadata(JSON.parse(fs.readFileSync(metadataPath, "utf8")), key, kind);
 }
 
 function readCasObject(
   cache: string,
   key: string,
-  expectedKind: CasMetadata["kind"],
-): Buffer | null {
-  const directory = objectDirectory(cache, key);
-  const metadataPath = path.join(directory, "meta.json");
-  if (!fs.existsSync(metadataPath)) {
+  kind: "state",
+): { readonly payload: Buffer; readonly record: StateRecord } | null;
+function readCasObject(
+  cache: string,
+  key: string,
+  kind: CasKind,
+): { readonly payload: Buffer } | null;
+function readCasObject(
+  cache: string,
+  key: string,
+  kind: "artifact",
+): { readonly payload: Buffer; readonly reliant: readonly string[] } | null;
+function readCasObject(
+  cache: string,
+  key: string,
+  kind: CasKind,
+): { readonly payload: Buffer; readonly record?: StateRecord; readonly reliant?: readonly string[] } | null {
+  const metadata = readCasMetadata(cache, key, kind);
+  if (metadata === null) {
     return null;
   }
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as CasMetadata;
-  if (
-    metadata.schema !== 1 ||
-    metadata.kind !== expectedKind ||
-    metadata.key !== key ||
-    !Number.isSafeInteger(metadata.bytes) ||
-    metadata.bytes < 0 ||
-    !/^[0-9a-f]{64}$/.test(metadata.payloadSha256)
-  ) {
-    throw new Error("invalid CAS metadata");
-  }
-  const payload = fs.readFileSync(path.join(directory, payloadName(expectedKind)));
+  const payload = fs.readFileSync(path.join(objectDirectory(cache, key), payloadName(kind)));
   if (payload.byteLength !== metadata.bytes || sha256(payload) !== metadata.payloadSha256) {
     throw new Error("CAS payload digest mismatch");
   }
-  return payload;
+  return metadata.kind === "state"
+    ? { payload, record: { parent: metadata.parent, foreigns: metadata.foreigns } }
+    : { payload, reliant: metadata.reliant };
 }
 
 function putCasObject(
   cache: string,
   key: string,
-  kind: CasMetadata["kind"],
   payload: Uint8Array,
+  entry: CasEntry,
 ): void {
   const directory = objectDirectory(cache, key);
   if (fs.existsSync(path.join(directory, "meta.json"))) {
-    const existing = readCasObject(cache, key, kind);
-    if (existing === null || !existing.equals(payload)) {
+    const existing = readCasObject(cache, key, entry.kind);
+    if (existing === null || !existing.payload.equals(payload)) {
       throw new Error(`immutable CAS collision at ${key}`);
     }
     return;
@@ -471,14 +682,16 @@ function putCasObject(
   fs.mkdirSync(temporary, { mode: 0o700 });
   try {
     const body = Buffer.from(payload);
-    fs.writeFileSync(path.join(temporary, payloadName(kind)), body, { mode: 0o600 });
-    const metadata: CasMetadata = {
-      schema: 1,
-      kind,
+    fs.writeFileSync(path.join(temporary, payloadName(entry.kind)), body, { mode: 0o600 });
+    const common = {
+      schema: 2,
       key,
       payloadSha256: sha256(body),
       bytes: body.byteLength,
-    };
+    } as const;
+    const metadata: CasMetadata = entry.kind === "state"
+      ? { ...common, kind: "state", parent: entry.record.parent, foreigns: entry.record.foreigns }
+      : { ...common, kind: "artifact", reliant: entry.reliant };
     fs.writeFileSync(
       path.join(temporary, "meta.json"),
       `${JSON.stringify(metadata)}\n`,
@@ -491,8 +704,8 @@ function putCasObject(
         throw error;
       }
       fs.rmSync(temporary, { recursive: true, force: true });
-      const existing = readCasObject(cache, key, kind);
-      if (existing === null || !existing.equals(body)) {
+      const existing = readCasObject(cache, key, entry.kind);
+      if (existing === null || !existing.payload.equals(body)) {
         throw new Error(`concurrent immutable CAS collision at ${key}`);
       }
     }
@@ -545,10 +758,15 @@ function enumerateObjects(cache: string): Array<CasMetadata> {
     if (path.basename(file) !== "meta.json") {
       continue;
     }
+    const key = path.basename(path.dirname(file));
     try {
-      result.push(JSON.parse(fs.readFileSync(file, "utf8")) as CasMetadata);
+      const kind = objectKind(cache, key);
+      const metadata = kind === null ? null : readCasMetadata(cache, key, kind);
+      if (metadata !== null) {
+        result.push(metadata);
+      }
     } catch {
-      // verify handles malformed objects; status remains available.
+      // A malformed object is not listed; a read of its key quarantines it.
     }
   }
   return result;
@@ -606,8 +824,4 @@ function sha256(bytes: Uint8Array): string {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function fail(message: string): never {
-  throw new Error(message);
 }

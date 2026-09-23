@@ -1,8 +1,9 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import type {
   AdtLike,
-  BookLike,
   BookStateLike,
   CompilerRuntime,
   ConstructorLike,
@@ -12,216 +13,478 @@ import type {
 } from "./compiler.ts";
 import { PocError } from "./error.ts";
 
-const STATE_SCHEMA = 1;
+const PACK_SCHEMA = 3;
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
 
 type WireSpan = { readonly $span: readonly [number, number, number] };
 type WireValue = null | boolean | number | string | WireValue[] | { [key: string]: WireValue };
 
-interface WireAdt {
+// A stored record. Elaborations (`e`) are not stored: they hold checker
+// levels that a raise without an environment misreads (F1), and only the
+// compiler and the report read them. `r` is the report's summary instead: the
+// names the record's types and elaboration refer to. `Term` is a lowered
+// term: the encoder builds records of the checker's lowered terms, whose spans
+// the one stringify pass writes as `WireSpan`s.
+interface WireAdt<Term> {
   readonly $: "ADT";
   readonly n: number;
   readonly g: number;
-  readonly T: WireValue;
-  readonly c: readonly WireConstructor[];
+  readonly T: Term;
+  readonly c: readonly WireConstructor<Term>[];
+  readonly r: readonly string[];
   readonly b?: boolean;
 }
 
-interface WireDefinition {
+interface WireDefinition<Term> {
   readonly $: "Def";
   readonly n: number;
   readonly x: number;
-  readonly T: WireValue;
-  readonly v: WireValue | null;
-  readonly e?: WireValue;
+  readonly T: Term;
+  readonly v: Term | null;
+  readonly r: readonly string[];
   readonly b?: boolean;
   readonly u?: boolean;
   readonly i?: readonly string[];
 }
 
-interface WireConstructor {
+interface WireConstructor<Term> {
   readonly k: string;
   readonly n: number;
-  readonly T: WireValue;
+  readonly T: Term;
 }
 
-type WireTopLevel = WireAdt | WireDefinition;
+type WireTopLevel<Term> = WireAdt<Term> | WireDefinition<Term>;
 
-interface WireState {
+// A pack is what one sealed boundary adds to the state it extends: the
+// records a book_over child owns after book_valid (its events' names, a
+// fill's copy of its law, and the instances minted while checking them),
+// its slice of the event order, the instance-table entries its parent lacks,
+// the files it loaded, the absolute counts of holes and open laws, and
+// `last`, the order index where its last file's events begin (the loader's
+// mark when that file is an entry). A state is its chain of packs, root
+// first. The encoding is canonical: every table is sorted by name.
+interface WirePack {
   readonly schema: number;
+  readonly parent: string | null;
+  readonly last: number;
   readonly sources: readonly string[];
-  readonly book: {
-    readonly tlds: readonly (readonly [string, WireTopLevel])[];
-    readonly ctrs: readonly string[];
-    readonly order: readonly string[];
-    readonly hols: number;
-    readonly open: number;
-    readonly tmps: readonly (readonly [string, readonly (readonly [string, string])[]])[];
-  };
+  readonly tlds: readonly (readonly [string, WireTopLevel<WireValue>])[];
+  readonly ctrs: readonly string[];
+  readonly order: readonly string[];
+  readonly hols: number;
+  readonly open: number;
+  readonly tmps: readonly (readonly [string, readonly (readonly [string, string])[]])[];
   readonly seen: readonly (readonly [string, string | null])[];
 }
 
-export function encodeBookState(
-  runtime: CompilerRuntime,
-  state: BookStateLike,
-): Buffer {
-  try {
-    const sources: string[] = [];
-    const sourceIds = new Map<string, number>();
-    const encodeTerm = (term: PlainTerm): WireValue =>
-      encodeValue(term, sources, sourceIds);
-    const lower = (term: Parameters<typeof runtime.Bend.term_lower>[0]): WireValue =>
-      encodeTerm(runtime.Bend.term_lower(term));
-    const normalizeLower = (term: PlainTerm): WireValue =>
-      encodeTerm(runtime.Bend.term_lower(runtime.Bend.term_higher(term)));
+// The reference summaries of restored records, whose elaborations are gone.
+// A record the checker creates (a fill's copy included) is a new object, so
+// it is never found here and its summary is computed from its own terms.
+const summaries = new WeakMap<TopLevelLike, readonly string[]>();
 
-    const tlds: Array<readonly [string, WireTopLevel]> = [];
-    for (const name of Object.keys(state.book.tlds)) {
-      const tld = state.book.tlds[name];
+// The names a record's types and elaboration refer to, as the checker's
+// report walks them (cli_report: constructor types for a datatype, the type
+// and elaboration for a definition; spans skipped; shared nodes once).
+export function referencesOf(runtime: CompilerRuntime, tld: TopLevelLike): readonly string[] {
+  const stored = summaries.get(tld);
+  if (stored !== undefined) {
+    return stored;
+  }
+  const out = new Set<string>();
+  const seen = new Set<object>();
+  if (tld.$ === "ADT") {
+    for (const constructor of tld.c) {
+      termRefs(runtime.Bend.term_lower(constructor.T), out, seen);
+    }
+  } else {
+    termRefs(runtime.Bend.term_lower(tld.T), out, seen);
+    termRefs(tld.e, out, seen);
+  }
+  return [...out].sort();
+}
+
+// What the checker's report reads of a record: whether it is a promise
+// (@unsafe, or foreign outside Base) and the names it refers to.
+export interface RecordSummary {
+  readonly promise: boolean;
+  readonly refs: readonly string[];
+}
+
+// Summaries of records not raised yet, per restored table, read from the
+// wire, so a report never raises a restored record.
+const pending = new WeakMap<object, Map<string, RecordSummary>>();
+
+function promiseOf(tld: TopLevelLike): boolean {
+  return tld.$ === "Def" && (tld.u === true || (tld.i !== undefined && tld.b !== true));
+}
+
+// The summary of the record `name` resolves to through a chain of tables.
+export function summaryOf(
+  runtime: CompilerRuntime,
+  table: Record<string, TopLevelLike>,
+  name: string,
+): RecordSummary | undefined {
+  for (let level: object | null = table; level !== null; level = Object.getPrototypeOf(level) as object | null) {
+    const descriptor = Object.getOwnPropertyDescriptor(level, name);
+    if (descriptor === undefined) {
+      continue;
+    }
+    if ("value" in descriptor) {
+      const tld = descriptor.value as TopLevelLike;
+      return { promise: promiseOf(tld), refs: referencesOf(runtime, tld) };
+    }
+    return pending.get(level)?.get(name);
+  }
+  return undefined;
+}
+
+// Every name a chain of tables resolves.
+export function namesOf(table: object): string[] {
+  const names = new Set<string>();
+  for (let level: object | null = table; level !== null; level = Object.getPrototypeOf(level) as object | null) {
+    for (const name of Object.keys(level)) {
+      names.add(name);
+    }
+  }
+  return [...names];
+}
+
+// An explicit stack and `for…in` (no per-node arrays): elaborations reach a
+// few hundred thousand nodes, and a DAG's shared nodes are visited once.
+function termRefs(term: unknown, out: Set<string>, seen: Set<object>): void {
+  const stack: unknown[] = [term];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (typeof node !== "object" || node === null || seen.has(node)) {
+      continue;
+    }
+    seen.add(node);
+    const fields = node as Record<string, unknown>;
+    const tag = fields.$;
+    if ((tag === "Ref" || tag === "ADT") && typeof fields.k === "string") {
+      out.add(fields.k);
+    }
+    for (const field in fields) {
+      if (field !== "s") {
+        const value = fields[field];
+        if (typeof value === "object" && value !== null) {
+          stack.push(value);
+        }
+      }
+    }
+  }
+}
+
+const byName = <T>(left: readonly [string, T], right: readonly [string, T]): number =>
+  left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0;
+
+// The canonical wire text of the records `child` adds over `parent`, where
+// child = book_over(parent) after book_valid (or any book whose own table keys
+// are its additions). `last` is the order index where its last file begins.
+export function encodePackWire(
+  runtime: CompilerRuntime,
+  parentKey: string | null,
+  parent: BookStateLike,
+  child: BookStateLike,
+  last: number,
+): string {
+  try {
+    const book = child.book;
+    const names = Object.keys(book.tlds).sort();
+    // Records hold lowered terms; one stringify pass writes them, turning each
+    // span into a reference to its interned source text.
+    const tlds = names.map((name) => {
+      const tld = book.tlds[name];
       if (tld === undefined) {
         throw new PocError("CODEC", `book.tlds.${name} is missing`);
       }
-      tlds.push([name, encodeTopLevel(tld, lower, normalizeLower)]);
+      return [name, encodeTopLevel(runtime, tld, (term) => runtime.Bend.term_lower(term))] as const;
+    });
+    const sources: string[] = [];
+    const sourceIds = new Map<string, number>();
+    const records = JSON.stringify(tlds, function (this: unknown, _key: string, value: unknown): unknown {
+      if (typeof value === "number" && !Number.isFinite(value)) {
+        throw new PocError("CODEC", "term contains a non-finite number", { value });
+      }
+      if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+        throw new PocError("CODEC", "lowered term contains a non-data value", { type: typeof value });
+      }
+      if (typeof value === "object" && value !== null && !Array.isArray(value) && isSpan(value)) {
+        let sourceId = sourceIds.get(value.src);
+        if (sourceId === undefined) {
+          sourceId = sources.length;
+          sources.push(value.src);
+          sourceIds.set(value.src, sourceId);
+        }
+        return { $span: [sourceId, value.beg, value.end] } satisfies WireSpan;
+      }
+      return value;
+    });
+    const done = parent.book.order.length;
+    if (
+      book.order.length < done ||
+      book.order.slice(0, done).some((name, index) => name !== parent.book.order[index]) ||
+      !Number.isSafeInteger(last) ||
+      last < done ||
+      last > book.order.length
+    ) {
+      throw new PocError("CODEC", "a pack's order does not extend its parent's");
     }
-
-    const wire: WireState = {
-      schema: STATE_SCHEMA,
-      sources,
-      book: {
-        tlds,
-        ctrs: Object.keys(state.book.ctrs),
-        order: [...state.book.order],
-        hols: state.book.hols,
-        open: state.book.open,
-        tmps: Object.keys(state.book.tmps).map((name) => [
-          name,
-          Object.entries(state.book.tmps[name] ?? Object.create(null)),
-        ]),
-      },
-      seen: [...state.seen.entries()],
-    };
-    return gzipSync(Buffer.from(JSON.stringify(wire), "utf8"), { level: 9 });
+    const tmps: Array<readonly [string, Array<readonly [string, string]>]> = [];
+    for (const name of Object.keys(book.tmps).sort()) {
+      const inherited = parent.book.tmps[name];
+      const added = Object.entries(book.tmps[name] ?? {})
+        .filter(([key]) => inherited === undefined || !Object.hasOwn(inherited, key))
+        .sort(byName);
+      if (added.length > 0) {
+        tmps.push([name, added]);
+      }
+    }
+    // The fields of WirePack, in its order; `records` is the `tlds` text.
+    const head = JSON.stringify({ schema: PACK_SCHEMA, parent: parentKey, last } satisfies Pick<WirePack, "schema" | "parent" | "last">);
+    const tail = JSON.stringify({
+      ctrs: Object.keys(book.ctrs).sort(),
+      order: book.order.slice(done),
+      hols: book.hols,
+      open: book.open,
+      tmps,
+      seen: [...child.seen.entries()].filter(([file]) => !parent.seen.has(file)).sort(byName),
+    } satisfies Omit<WirePack, "schema" | "parent" | "last" | "sources" | "tlds">);
+    return `${head.slice(0, -1)},"sources":${JSON.stringify(sources)},"tlds":${records},${tail.slice(1)}`;
   } catch (cause) {
     if (cause instanceof PocError) {
       throw cause;
     }
-    throw new PocError("CODEC", "could not encode checked Bend state", {}, { cause });
+    throw new PocError("CODEC", "could not encode a checked Bend pack", {}, { cause });
   }
 }
 
-export function decodeBookState(
+export function encodePack(
   runtime: CompilerRuntime,
-  compressed: Uint8Array,
-): BookStateLike {
+  parentKey: string | null,
+  parent: BookStateLike,
+  child: BookStateLike,
+  last: number,
+): Buffer {
+  return gzipSync(
+    Buffer.from(encodePackWire(runtime, parentKey, parent, child, last), "utf8"),
+    { level: 6 },
+  );
+}
+
+export interface DecodedPack {
+  readonly parent: string | null;
+  readonly last: number;
+  // Adds the pack to the flat state it extends. Records are raised lazily:
+  // each table entry is an accessor that raises its record on first read and
+  // then becomes a plain data property; its setter makes an assignment through
+  // a child table (a fill of a restored law) an own property of that child.
+  readonly apply: (state: BookStateLike) => void;
+  // Raises every record now (verification).
+  readonly force: () => void;
+}
+
+export function decodePack(runtime: CompilerRuntime, compressed: Uint8Array): DecodedPack {
   if (compressed.byteLength > MAX_COMPRESSED_BYTES) {
-    throw new PocError("CODEC", "compressed checkpoint exceeds the size limit", {
+    throw new PocError("CODEC", "compressed pack exceeds the size limit", {
       bytes: compressed.byteLength,
       limit: MAX_COMPRESSED_BYTES,
     });
   }
+  let plain: string;
+  try {
+    plain = gunzipSync(compressed, { maxOutputLength: MAX_UNCOMPRESSED_BYTES }).toString("utf8");
+  } catch (cause) {
+    throw new PocError("CODEC", "pack is not valid gzip", {}, { cause });
+  }
+  return decodePackWire(runtime, plain);
+}
+
+export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedPack {
   let parsed: unknown;
   try {
-    const plain = gunzipSync(compressed, { maxOutputLength: MAX_UNCOMPRESSED_BYTES });
-    parsed = JSON.parse(plain.toString("utf8")) as unknown;
+    parsed = JSON.parse(text) as unknown;
   } catch (cause) {
-    throw new PocError("CODEC", "checkpoint is not valid gzip JSON", {}, { cause });
+    throw new PocError("CODEC", "pack is not valid JSON", {}, { cause });
   }
 
   try {
-    const root = record(parsed, "checkpoint");
-    integer(root.schema, "checkpoint.schema");
-    if (root.schema !== STATE_SCHEMA) {
-      throw new PocError("CODEC", "unsupported checkpoint schema", {
-        expected: STATE_SCHEMA,
+    const root = record(parsed, "pack");
+    integer(root.schema, "pack.schema");
+    if (root.schema !== PACK_SCHEMA) {
+      throw new PocError("CODEC", "unsupported pack schema", {
+        expected: PACK_SCHEMA,
         found: root.schema,
       });
     }
-    const sources = stringArray(root.sources, "checkpoint.sources");
-    const rawBook = record(root.book, "checkpoint.book");
-    const book = runtime.Bend.book_nil();
+    const parent = root.parent === null ? null : string(root.parent, "pack.parent");
+    const last = nonNegativeInteger(root.last, "pack.last");
+    const sources = stringArray(root.sources, "pack.sources");
 
-    for (const [index, rawEntry] of array(rawBook.tlds, "checkpoint.book.tlds").entries()) {
-      const pair = tuple(rawEntry, 2, `checkpoint.book.tlds[${index}]`);
-      const name = string(pair[0], `checkpoint.book.tlds[${index}][0]`);
-      if (Object.hasOwn(book.tlds, name)) {
+    // Names and constructor ownership are parsed now; terms when first read.
+    const tlds = new Map<
+      string,
+      { readonly raise: () => TopLevelLike; readonly adt: boolean; readonly summary: RecordSummary }
+    >();
+    const ctrOwners = new Map<string, string>();
+    for (const [index, rawEntry] of array(root.tlds, "pack.tlds").entries()) {
+      const pair = tuple(rawEntry, 2, `pack.tlds[${index}]`);
+      const name = string(pair[0], `pack.tlds[${index}][0]`);
+      if (tlds.has(name)) {
         throw new PocError("CODEC", `duplicate top-level name ${name}`);
       }
-      book.tlds[name] = decodeTopLevel(
-        runtime,
-        pair[1],
-        sources,
-        `checkpoint.book.tlds[${index}][1]`,
-      );
-    }
-
-    const expectedCtrs = stringArray(rawBook.ctrs, "checkpoint.book.ctrs");
-    for (const tld of Object.values(book.tlds)) {
-      if (tld.$ === "ADT") {
-        for (const constructor of tld.c) {
-          if (Object.hasOwn(book.ctrs, constructor.k)) {
-            throw new PocError("CODEC", `duplicate constructor ${constructor.k}`);
+      const location = `pack.tlds[${index}][1]`;
+      const raw = record(pair[1], location);
+      const tag = string(raw.$, `${location}.$`);
+      if (tag !== "ADT" && tag !== "Def") {
+        throw new PocError("CODEC", `unknown top-level tag ${tag}`, { location, tag });
+      }
+      if (tag === "ADT") {
+        for (const [ctrIndex, item] of array(raw.c, `${location}.c`).entries()) {
+          const ctr = string(record(item, `${location}.c[${ctrIndex}]`).k, `${location}.c[${ctrIndex}].k`);
+          if (ctrOwners.has(ctr)) {
+            throw new PocError("CODEC", `duplicate constructor ${ctr}`);
           }
-          book.ctrs[constructor.k] = constructor;
+          ctrOwners.set(ctr, name);
         }
       }
+      let raised: TopLevelLike | undefined;
+      const foreign = raw.i !== undefined;
+      tlds.set(name, {
+        adt: tag === "ADT",
+        summary: {
+          promise: tag === "Def" && (raw.u === true || (foreign && raw.b !== true)),
+          refs: stringArray(raw.r, `${location}.r`),
+        },
+        raise: () => {
+          if (raised === undefined) {
+            raised = decodeTopLevel(runtime, raw, sources, location);
+          }
+          return raised;
+        },
+      });
     }
+    const expectedCtrs = stringArray(root.ctrs, "pack.ctrs");
     if (
-      expectedCtrs.length !== Object.keys(book.ctrs).length ||
-      expectedCtrs.some((name) => !Object.hasOwn(book.ctrs, name))
+      expectedCtrs.length !== ctrOwners.size ||
+      expectedCtrs.some((name) => !ctrOwners.has(name))
     ) {
-      throw new PocError("CODEC", "checkpoint constructor index disagrees with ADTs");
+      throw new PocError("CODEC", "pack constructor index disagrees with its ADTs");
     }
+    const order = stringArray(root.order, "pack.order");
+    const hols = nonNegativeInteger(root.hols, "pack.hols");
+    const open = nonNegativeInteger(root.open, "pack.open");
+    const tmps: Array<readonly [string, Array<readonly [string, string]>]> = [];
+    for (const [index, rawEntry] of array(root.tmps, "pack.tmps").entries()) {
+      const pair = tuple(rawEntry, 2, `pack.tmps[${index}]`);
+      const name = string(pair[0], `pack.tmps[${index}][0]`);
+      const entries = array(pair[1], `pack.tmps[${index}][1]`).map((rawItem, itemIndex) => {
+        const item = tuple(rawItem, 2, `pack.tmps[${index}][1][${itemIndex}]`);
+        return [string(item[0], "template key"), string(item[1], "template value")] as const;
+      });
+      tmps.push([name, entries]);
+    }
+    const seen = array(root.seen, "pack.seen").map((rawEntry, index) => {
+      const pair = tuple(rawEntry, 2, `pack.seen[${index}]`);
+      const file = string(pair[0], `pack.seen[${index}][0]`);
+      const namespace = pair[1] === null ? null : string(pair[1], `pack.seen[${index}][1]`);
+      return [file, namespace] as const;
+    });
 
-    book.order.push(...stringArray(rawBook.order, "checkpoint.book.order"));
-    book.hols = nonNegativeInteger(rawBook.hols, "checkpoint.book.hols");
-    book.open = nonNegativeInteger(rawBook.open, "checkpoint.book.open");
-    for (const [index, rawEntry] of array(rawBook.tmps, "checkpoint.book.tmps").entries()) {
-      const pair = tuple(rawEntry, 2, `checkpoint.book.tmps[${index}]`);
-      const name = string(pair[0], `checkpoint.book.tmps[${index}][0]`);
-      const table: Record<string, string> = Object.create(null) as Record<string, string>;
-      for (const [itemIndex, rawItem] of array(
-        pair[1],
-        `checkpoint.book.tmps[${index}][1]`,
-      ).entries()) {
-        const item = tuple(rawItem, 2, `checkpoint.book.tmps[${index}][1][${itemIndex}]`);
-        const key = string(item[0], "template key");
-        if (Object.hasOwn(table, key)) {
-          throw new PocError("CODEC", `duplicate template key ${key}`);
+    return {
+      parent,
+      last,
+      force() {
+        for (const entry of tlds.values()) {
+          entry.raise();
         }
-        table[key] = string(item[1], "template value");
-      }
-      book.tmps[name] = table;
-    }
-
-    const seen = new Map<string, string | null>();
-    for (const [index, rawEntry] of array(root.seen, "checkpoint.seen").entries()) {
-      const pair = tuple(rawEntry, 2, `checkpoint.seen[${index}]`);
-      const file = string(pair[0], `checkpoint.seen[${index}][0]`);
-      const namespace = pair[1] === null
-        ? null
-        : string(pair[1], `checkpoint.seen[${index}][1]`);
-      if (seen.has(file)) {
-        throw new PocError("CODEC", `duplicate seen path ${file}`);
-      }
-      seen.set(file, namespace);
-    }
-    return { book, seen };
+      },
+      apply(state) {
+        const book = state.book;
+        if (last < book.order.length || last > book.order.length + order.length) {
+          throw new PocError("CODEC", "pack.last is outside its order slice");
+        }
+        let summaries = pending.get(book.tlds);
+        if (summaries === undefined) {
+          summaries = new Map();
+          pending.set(book.tlds, summaries);
+        }
+        for (const [name, entry] of tlds) {
+          lazyProperty(book.tlds, name, entry.raise);
+          summaries.set(name, entry.summary);
+        }
+        for (const [ctr, owner] of ctrOwners) {
+          const entry = tlds.get(owner);
+          lazyProperty(book.ctrs, ctr, () => {
+            const adt = entry?.raise();
+            const found = adt?.$ === "ADT" ? adt.c.find((item) => item.k === ctr) : undefined;
+            if (found === undefined) {
+              throw new PocError("CODEC", `constructor ${ctr} is missing from ${owner}`);
+            }
+            return found;
+          });
+        }
+        book.order.push(...order);
+        book.hols = hols;
+        book.open = open;
+        for (const [name, entries] of tmps) {
+          const table = book.tmps[name] ?? (Object.create(null) as Record<string, string>);
+          for (const [key, value] of entries) {
+            if (Object.hasOwn(table, key)) {
+              throw new PocError("CODEC", `pack redefines template key ${name} ${key}`);
+            }
+            table[key] = value;
+          }
+          book.tmps[name] = table;
+        }
+        for (const [file, namespace] of seen) {
+          if (state.seen.has(file)) {
+            throw new PocError("CODEC", `pack reloads ${file}`);
+          }
+          state.seen.set(file, namespace);
+        }
+      },
+    };
   } catch (cause) {
     if (cause instanceof PocError) {
       throw cause;
     }
-    throw new PocError("CODEC", "checkpoint has an invalid shape", {}, { cause });
+    throw new PocError("CODEC", "pack has an invalid shape", {}, { cause });
   }
 }
 
+function lazyProperty<T>(table: Record<string, T>, name: string, raise: () => T): void {
+  const own = (target: object, value: T): void => {
+    Object.defineProperty(target, name, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  };
+  Object.defineProperty(table, name, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      const value = raise();
+      own(table, value);
+      return value;
+    },
+    set(this: object, value: T) {
+      own(this, value);
+    },
+  });
+}
+
 function encodeTopLevel(
+  runtime: CompilerRuntime,
   tld: TopLevelLike,
-  lower: (term: Parameters<CompilerRuntime["Bend"]["term_lower"]>[0]) => WireValue,
-  normalizeLower: (term: PlainTerm) => WireValue,
-): WireTopLevel {
+  lower: (term: Parameters<CompilerRuntime["Bend"]["term_lower"]>[0]) => PlainTerm,
+): WireTopLevel<PlainTerm> {
+  const r = referencesOf(runtime, tld);
   if (tld.$ === "ADT") {
-    return optionalBoolean({
+    return {
       $: "ADT",
       n: tld.n,
       g: tld.g,
@@ -231,35 +494,39 @@ function encodeTopLevel(
         n: constructor.n,
         T: lower(constructor.T),
       })),
-    }, "b", tld.b) as WireAdt;
+      r,
+      ...(tld.b === undefined ? {} : { b: tld.b }),
+    };
   }
-  let wire: Record<string, unknown> = {
+  return {
     $: "Def",
     n: tld.n,
     x: tld.x,
     T: lower(tld.T),
     v: tld.v === null ? null : lower(tld.v),
+    r,
+    ...(tld.b === undefined ? {} : { b: tld.b }),
+    ...(tld.u === undefined ? {} : { u: tld.u }),
+    ...(tld.i === undefined ? {} : { i: tld.i.map(pathReal) }),
   };
-  if (tld.e !== undefined) {
-    wire.e = normalizeLower(tld.e);
-  }
-  wire = optionalBoolean(wire, "b", tld.b);
-  wire = optionalBoolean(wire, "u", tld.u);
-  if (tld.i !== undefined) {
-    wire.i = [...tld.i];
-  }
-  return wire as unknown as WireDefinition;
+}
+
+// A path as the checker's CLI resolves it (main.ts path_real): its realpath
+// when it exists. Foreign paths are stored this way, so a state does not
+// depend on the spelling of the path its file was loaded through.
+export function pathReal(file: string): string {
+  return fs.existsSync(file) ? fs.realpathSync(file) : path.resolve(file);
 }
 
 function decodeTopLevel(
   runtime: CompilerRuntime,
-  value: unknown,
+  raw: Record<string, unknown>,
   sources: readonly string[],
   location: string,
 ): TopLevelLike {
-  const raw = record(value, location);
-  const tag = string(raw.$, `${location}.$`);
-  if (tag === "ADT") {
+  const references = stringArray(raw.r, `${location}.r`);
+  let result: TopLevelLike;
+  if (raw.$ === "ADT") {
     const constructors = array(raw.c, `${location}.c`).map((item, index) => {
       const source = record(item, `${location}.c[${index}]`);
       return {
@@ -268,37 +535,32 @@ function decodeTopLevel(
         T: higher(runtime, source.T, sources, `${location}.c[${index}].T`),
       } satisfies ConstructorLike;
     });
-    const result: AdtLike = {
+    const adt: AdtLike = {
       $: "ADT",
       n: nonNegativeInteger(raw.n, `${location}.n`),
       g: nonNegativeInteger(raw.g, `${location}.g`),
       T: higher(runtime, raw.T, sources, `${location}.T`),
       c: constructors,
     };
-    assignOptionalBoolean(result, "b", raw.b, `${location}.b`);
-    return result;
-  }
-  if (tag === "Def") {
-    const result: DefinitionLike = {
+    assignOptionalBoolean(adt, "b", raw.b, `${location}.b`);
+    result = adt;
+  } else {
+    const definition: DefinitionLike = {
       $: "Def",
       n: nonNegativeInteger(raw.n, `${location}.n`),
       x: nonNegativeInteger(raw.x, `${location}.x`),
       T: higher(runtime, raw.T, sources, `${location}.T`),
       v: raw.v === null ? null : higher(runtime, raw.v, sources, `${location}.v`),
     };
-    if (raw.e !== undefined) {
-      const lowered = restoreValue(raw.e, sources, `${location}.e`) as PlainTerm;
-      runtime.Bend.term_lower(runtime.Bend.term_higher(lowered));
-      result.e = lowered;
-    }
-    assignOptionalBoolean(result, "b", raw.b, `${location}.b`);
-    assignOptionalBoolean(result, "u", raw.u, `${location}.u`);
+    assignOptionalBoolean(definition, "b", raw.b, `${location}.b`);
+    assignOptionalBoolean(definition, "u", raw.u, `${location}.u`);
     if (raw.i !== undefined) {
-      result.i = stringArray(raw.i, `${location}.i`);
+      definition.i = stringArray(raw.i, `${location}.i`);
     }
-    return result;
+    result = definition;
   }
-  throw new PocError("CODEC", `unknown top-level tag ${tag}`, { location, tag });
+  summaries.set(result, references);
+  return result;
 }
 
 function higher(
@@ -307,50 +569,7 @@ function higher(
   sources: readonly string[],
   location: string,
 ): ReturnType<CompilerRuntime["Bend"]["term_higher"]> {
-  const lowered = restoreValue(value, sources, location) as PlainTerm;
-  const result = runtime.Bend.term_higher(lowered);
-  runtime.Bend.term_lower(result);
-  return result;
-}
-
-function encodeValue(
-  value: unknown,
-  sources: string[],
-  sourceIds: Map<string, number>,
-): WireValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new PocError("CODEC", "term contains a non-finite number", { value });
-    }
-    return value;
-  }
-  if (typeof value !== "object") {
-    throw new PocError("CODEC", "lowered term contains a non-data value", {
-      type: typeof value,
-    });
-  }
-  if (isSpan(value)) {
-    let sourceId = sourceIds.get(value.src);
-    if (sourceId === undefined) {
-      sourceId = sources.length;
-      sources.push(value.src);
-      sourceIds.set(value.src, sourceId);
-    }
-    return { $span: [sourceId, value.beg, value.end] } satisfies WireSpan;
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => encodeValue(item, sources, sourceIds));
-  }
-  const output: Record<string, WireValue> = Object.create(null) as Record<string, WireValue>;
-  for (const [key, item] of Object.entries(value)) {
-    if (item !== undefined) {
-      output[key] = encodeValue(item, sources, sourceIds);
-    }
-  }
-  return output;
+  return runtime.Bend.term_higher(restoreValue(value, sources, location) as PlainTerm);
 }
 
 function restoreValue(value: unknown, sources: readonly string[], location: string): unknown {
@@ -400,17 +619,6 @@ function isSpan(value: object): value is { src: string; beg: number; end: number
     Number.isInteger(raw.end) &&
     Object.keys(value).length === 3
   );
-}
-
-function optionalBoolean<T extends Record<string, unknown>>(
-  value: T,
-  key: string,
-  item: boolean | undefined,
-): T {
-  if (item !== undefined) {
-    (value as Record<string, unknown>)[key] = item;
-  }
-  return value;
 }
 
 function assignOptionalBoolean<T extends object, K extends keyof T>(

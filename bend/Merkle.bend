@@ -64,6 +64,10 @@ def Sequence.snoc(domain: String, prefix: Digest, item: Digest) -> Digest:
 def Key.file_bytes(base64: String) -> Digest:
   Merkle.digest(Leaf{"file-bytes-base64", base64})
 
+# A source file as the checker reads it: its UTF-8 text.
+def Key.file_text(text: String) -> Digest:
+  Merkle.digest(Leaf{"file-text-utf8", text})
+
 def Key.compiler(files: Digest, hash_library: Digest) -> Digest:
   Merkle.digest(Fork{
     "compiler",
@@ -83,35 +87,27 @@ def Key.named_input(role: String, path: String, content: Digest) -> Digest:
     Leaf{"digest", Digest.hex(content)}
   })
 
-# Import edges
-# ------------
+# Checker load order
+# ------------------
+#
+# The checker loads files in one order and checks each after the files it
+# imports. The state after the first k files of an entry's load order is keyed
+# by P_k = Load.snoc(P_(k-1), Key.step(...)), starting from P_0 = the compiler
+# key: a changed, moved or retargeted file changes the chain from its step on.
 
-def Key.import_base(compiler: Digest, base_path: String, alias: String) -> Digest:
+def Key.step(namespace: String, path: String, content: Digest) -> Digest:
   Merkle.digest(Fork{
-    "import-base",
-    base_path,
-    Leaf{"digest", Digest.hex(compiler)},
-    Leaf{"alias", alias}
+    "load-step",
+    namespace,
+    Leaf{"path", path},
+    Leaf{"digest", Digest.hex(content)}
   })
 
-def Key.import_hub(specifier: String, alias: String) -> Digest:
-  Merkle.digest(Fork{
-    "import-hub",
-    specifier,
-    Leaf{"alias", alias},
-    Empty{}
-  })
+def Load.snoc(prefix: Digest, step: Digest) -> Digest:
+  Sequence.snoc("checker-load-order", prefix, step)
 
-def Key.import_local(specifier: String, alias: String, target: Digest) -> Digest:
-  Merkle.digest(Fork{
-    "import-local",
-    specifier,
-    Leaf{"alias", alias},
-    Leaf{"digest", Digest.hex(target)}
-  })
-
-# Source and checkpoint nodes
-# ---------------------------
+# Artifacts
+# ---------
 
 def Key.foreign(path: String, content: Digest) -> Digest:
   Merkle.digest(Fork{
@@ -121,52 +117,25 @@ def Key.foreign(path: String, content: Digest) -> Digest:
     Empty{}
   })
 
-def Key.source(path: String, content: Digest, imports: Digest, foreigns: Digest) -> Digest:
-  Merkle.digest(Fork{
-    "source-node",
-    path,
-    Fork{
-      "source-inputs",
-      "ordered",
-      Leaf{"digest", Digest.hex(content)},
-      Leaf{"digest", Digest.hex(imports)}
-    },
-    Leaf{"digest", Digest.hex(foreigns)}
-  })
-
-def Key.prefix_start(compiler: Digest, entry_path: String) -> Digest:
-  Merkle.digest(Fork{
-    "checked-import-prefix-start",
-    entry_path,
-    Leaf{"digest", Digest.hex(compiler)},
-    Empty{}
-  })
-
-def Key.prefix_step(prefix: Digest, import_key: Digest) -> Digest:
-  Merkle.digest(Fork{
-    "checked-import-prefix-step",
-    "ordered",
-    Leaf{"digest", Digest.hex(prefix)},
-    Leaf{"digest", Digest.hex(import_key)}
-  })
-
-def Key.entry_state(compiler: Digest, source: Digest, prefix: Digest) -> Digest:
-  Merkle.digest(Fork{
-    "checked-entry",
-    "book-state-v1",
-    Leaf{"digest", Digest.hex(compiler)},
-    Fork{
-      "checked-entry-inputs",
-      "source-and-prefix",
-      Leaf{"digest", Digest.hex(source)},
-      Leaf{"digest", Digest.hex(prefix)}
-    }
-  })
-
-def Key.artifact(state: Digest, target: String) -> Digest:
+# An artifact is the final checked state, the target, and the foreign files
+# the checked records name (their bytes are embedded by the emitters).
+def Key.artifact(state: Digest, target: String, foreigns: Digest) -> Digest:
   Merkle.digest(Fork{
     "compiled-artifact",
     target,
     Leaf{"digest", Digest.hex(state)},
+    Leaf{"digest", Digest.hex(foreigns)}
+  })
+
+# Retention
+# ---------
+
+# The name under which a build records what it keeps alive: one record per
+# entry and purpose ("check", or an emit target), replaced by each build.
+def Key.root(entry: String, purpose: String) -> Digest:
+  Merkle.digest(Fork{
+    "gc-root",
+    purpose,
+    Leaf{"path", entry},
     Empty{}
   })

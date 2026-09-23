@@ -1,130 +1,141 @@
 # Handoff: bend-proof-of-compile
 
-Status as of this document: **working end-to-end MVP with reusable import-prefix
-checkpoints**. The Nix installCheck proves cold build, longest-valid prefix
-fallback after a late import changes, cache-hit artifact restoration, runnable
-output, and clean cache verification.
+Status: **`SPEC-incremental-compilation.md` milestones 1–7 are in**, including
+the decided next step of compilation after restore (5): re-elaborate what
+`main` reaches, through a replay filter in the fork (`16379eb7`, local until
+pushed; see the spec's last section). Open: trust (b) and the proof scope.
+Decided and recorded: keep pure-Bend hashing and accept its cost. `nix build .#proof-of-compile` runs the codec laws and golden vectors,
+the hash against Node's, incremental histories against the pinned checker's
+CLI, and an install check.
 
 ## What this project is
 
 A content-addressed partial compiler ("proof of compile") for Bend 2. Every
-compilation input (compiler identity, hash-library identity, source files,
-import edges, foreign files, checkpoints, targets) is folded into Merkle keys.
-Cache keys *are* proofs: a hit means the checked compiler state / artifact was
-produced from exactly those inputs. Artifacts and checked compiler states live
-in a content-addressed store (CAS) under `$TMPDIR/bend-proof-of-compile/v1`.
+input of a check (compiler identity, hash-library identity, the checker's load
+order with each file's realpath, namespace and text) is folded into Merkle
+keys; an artifact's key adds the target and the foreign files the checked
+records name. A hit means the state or artifact was produced from exactly
+those inputs. States and artifacts live in a content-addressed store under
+`$TMPDIR/bend-proof-of-compile/v2`, which must be private to the user.
+
+The checked state after the first k files of an entry's load order is keyed
+`P_k` (`P_0` = the compiler key, `P_k = Load.snoc(P_(k-1), step k)`), so any
+entry whose load order starts the same way shares it. A build restores the
+longest stored, *sealed* `P_k`, checks the rest in `book_over` children of it,
+and stores a pack per sealed boundary.
 
 ## The one architectural rule (user constraint)
 
 **All semantics live in Bend. TypeScript is only a capability host.**
 
-TS may: read files, resolve paths, manage CAS bytes, spawn the Bend checker,
-interpret the compiled Bend IO program. TS may **never** compute a cache key,
-parse source semantics, decide invalidation, or know what a digest means. All
-hashing goes through the vendored `bend-hashes` package imported by Bend code.
+TS may: read files, manage CAS bytes, drive the Bend checker (whose loader is
+the only import parser), interpret the compiled Bend IO program. TS may
+**never** compute a cache key, parse source semantics, decide invalidation, or
+know what a digest means. All hashing goes through the vendored `bend-hashes`
+package (patched to stream; same functions and digests) imported by Bend code.
 
 Second user constraint: `bend-categories` is used to *prove* the categorical
 semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
-**removed before publishing**. It is already a flake input; see "Next steps".
+**removed before publishing**.
 
 ## File map
 
-### Bend (the application — this is the product)
+### Bend (the application)
 
-- `bend/Merkle.bend` — domain-separated Merkle key constructors over a binary
-  initial algebra (`Empty | Leaf{domain,payload} | Fork{domain,payload,l,r}`).
-  `Merkle.digest` is the catamorphism. `Sequence.empty/snoc` is the ordered
-  collection fold. `Key.*` smart constructors: `file_bytes`, `compiler`,
-  `named_input`, `import_base`, `import_hub`, `import_local`, `foreign`,
-  `source`, `prefix_start`, `prefix_step`, `entry_state`, `artifact`.
-  Imports `../vendor/bend-hashes/sha2_32.bend as Hash` (SHA-256).
-- `bend/Source.bend` — *pure* parser for the Bend import grammar: leading
-  `import Base` / `import ./X.bend [as A]` block, plus foreign
-  `import "./x.js"` lines collected from anywhere in the file. The host frames
-  source bytes into raw lines to avoid generated-JS stack overflow on large
-  `bend-categories` files; all lexical and dependency decisions remain here.
-- `bend/Host.bend` — foreign capability declarations. `Checkpoint{token}` and
-  `Stage{token}` are affine wrappers (`type ... is Type`) around opaque host
-  values — Bend cannot forge or duplicate checked state or a publication
-  transaction. `CompileStep` and `ResumeCandidate` are Bend-produced plans
-  mechanically interpreted by the host.
-- `bend/Graph.bend` — explicit, **fuelled** work-list state machine producing
-  the source DAG in post-order (children finalized before parents), with cycle
-  detection and source-key computation. Returns `IO(Result<String, Graph>)`.
-- `bend/App.bend` — orchestration as explicit IO continuations:
-  `App.build` = compiler key → graph build → artifact restore? → final-state
-  lookup? → longest valid import-prefix lookup → suffix plan execution →
-  **stability recheck** (rebuild graph, compare root key) → atomic publication
-  of staged checkpoints → artifact build + CAS put. Prefix keys, ordering,
-  namespace normalization, resume candidates, and suffix plans are all derived
-  in Bend. Plus CLI parsing (`Cli.run`, `Cli.program`, `main`).
+- `bend/Merkle.bend` — the binary Merkle initial algebra and its catamorphism
+  `Merkle.digest`; `Sequence.empty/snoc`; key constructors `file_bytes`,
+  `file_text`, `compiler`, `named_input`, `step`, `foreign`, `artifact`,
+  `root`; `Load.snoc` extends the load-order chain.
+- `bend/Host.bend` — capability declarations. `Checkpoint`/`Stage` are affine
+  (`is Type`) wrappers of host values. `LoadOrder{imports, entry, rule}` is the
+  checker's load order (the entry is its last step); `LateFill` is a law filled
+  in a later step than its declaration; `Verdict{todos, reliant}` is the
+  checker's judgment of a final state; `CheckGroup`/`ResumeCandidate` are
+  plans the host interprets; `OutputPath` is the emit target as the checker's
+  CLI resolves it.
+- `bend/App.bend` — everything that decides. `Build{entry, cache, compiler,
+  mode}` with `Mode = Checking | Emitting{Emission{output, target}}`. The
+  chain and its points; sealing (F5) and grouped check plans; the verdicts
+  (PROOF.bend rule, TODO count, the report text, the output rule) with the
+  checker's own texts; stability by comparing a second walk's observations;
+  GC roots; the CLI (`check`, `build`, `cache status|verify|gc`).
 
-### Foreign boundary (embedded into generated Bend JS)
+### Foreign boundary
 
-- `foreign/host.js` — the only JS allowed inside compiled Bend programs.
-  Translates to/from Bend constructors (`{$:"Con",...}` lists, `Done/Fail`,
-  `Maybe`, `Checkpoint`). Reads the `globalThis.POC_HOST` capability object.
-  **All effects are synchronous** (see gotchas).
-- `foreign/host.c` — deliberate stub; a native build should fail at link time
-  rather than silently change semantics.
+- `foreign/host.js` — the only JS inside the compiled program: converts to and
+  from Bend constructors and calls `globalThis.POC_HOST`. The checker's loader
+  is async: `poc_await` returns a promise of the Result, which `src/cli.ts`'s IO
+  loop awaits.
+- `foreign/host.c` — a deliberate stub.
 
-### TypeScript host (capability layer only)
+### TypeScript host
 
-- `src/cli.ts` — entrypoint. Imports `dist/app-lib.js`, converts argv to a
-  Bend list, and runs the `$FFI` operation loop. Also defines the
-  `io_out`/`io_bytes`/`io_tup` globals that `js_lib` output needs (the lib
-  emitter does not bundle the full runtime preamble).
-- `src/host-preload.ts` — `POC_HOST` implementation: temp cache root, CAS
-  layout `objects/<aa>/<key>/{meta.json,state.bin|artifact.bin}` with SHA-256
-  *storage* checksums (integrity only — content keys come from Bend),
-  quarantine-on-corruption, provisional checkpoint stages committed only after
-  Bend's stability proof, conservative GC (temp files only; never guesses
-  reachability). `compilerInputs()` uses a single `nix-store-identity` entry
-  for `/nix/store` roots (reading the whole compiler tree per build was a
-  10-minute slowdown); falls back to full tree walk elsewhere.
-- `src/compiler.ts` — wraps the pinned Bend compiler (`bend2` source dir):
-  `bookRead` supports an explicit loader namespace so a direct import can be
-  checked as the next prefix slice; `compileJs`, `compileC`, and
-  `compileLibrary(book, roots)` retain the compiler's export rules.
-- `src/compiler-worker.ts` — synchronous child process around `book_read`.
-- `src/codec.ts` — gzip+JSON codec for checked `BookState` checkpoints
-  (term lowering, span interning, schema version, size caps, full shape
-  validation on decode).
-- `src/build-bend-lib.ts` — builds `dist/app-lib.js` via
-  `compileLibrary(checked.book, ["Cli.program"])`.
+- `src/cli.ts` — loads `dist/app-lib.js`, runs the `$FFI` loop (awaiting
+  promised capabilities).
+- `src/host-preload.ts` — `POC_HOST`: private cache root; CAS
+  `objects/<aa>/<key>/{meta.json,state.bin|artifact.bin}` with SHA-256 storage
+  checksums (integrity only), metadata parsed at the boundary (schema 2: a
+  state's parent pack and its chain's foreign files; an artifact's report);
+  quarantine on corruption; stages published parents first after Bend's
+  stability check; GC roots and reachability GC.
+- `src/compiler.ts` — drives the pinned checker in process: `loadSteps`
+  (traversal-only walk; on a walk error, the cold load's error), `loadFills`
+  (parse-only load; laws filled late, with their foreign/`@unsafe` flags),
+  `check` (each group in a `book_over` child, later files skipped by `on` and
+  forgotten, then `book_valid`), `verdict` (`book_owned`, TODO count, and the
+  report, mirroring `cli_report` over summaries), `emit`, `emitRestored` (the
+  replay: `book_valid(book, 0, only)` over what `main` reaches, closed under
+  instance callers), and the checker's error rendering (`book_err`).
+- `src/codec.ts` — packs (schema 3): a sealed boundary's own records without
+  elaborations, with reference summaries; canonical; lazy restore through
+  accessor properties; summaries readable without raising.
+- `src/build-bend-lib.ts` — builds `dist/app-lib.js`.
 
-### Nix
+### Tests and tools
 
-- `flake.nix` — packages: `bend` (pinned branch
-  `o1lo01ol1o/bend/expose-book-state-api`, wrapped over bun), `bend-hashes`,
-  and `proof-of-compile` (checks Bend source, compiles `dist/app-lib.js`,
-  wraps `src/cli.ts` with `POC_APP_LIB`/`POC_BEND2_SOURCE`/`POC_HASHES_SOURCE`
-  env, `poc` symlink, installCheck smoke test). `apps.default` runs it.
-  checks: `bend-categories` + infrastructure smoke. `vendor/bend-hashes` is a
-  gitignored local symlink for editor/CLI convenience; Nix is the source of
-  truth.
+- `test/codec.test.ts` — golden vectors (`test/golden/`), decode∘encode = id on
+  each pack, no stored elaborations, summaries agree, restored tables stay
+  writable, malformed packs rejected (fixture `test/fixtures/pack/`).
+- `test/sha.test.ts` — the patched SHA-224/256 against Node's.
+- `test/acceptance.test.ts` — incremental histories, each step against `bend
+  --check-only` and `bend -o`: entry edit, final-module edit, failed extension,
+  branch to an old state, law filled later, open law and hole prefixes,
+  symlink retarget, `LAWS.bend` appearing, restart across processes, a second
+  entry sharing the prefix.
+- `tools/cold-equivalence.ts` — the same comparison over a whole corpus (the
+  fork's `tests/`), in parallel over one shared cache, optionally in warm
+  rounds.
+- `nix/patches/bend-hashes-sha2_32-streaming.patch` — the streaming SHA-2.
 
 ## Verified behaviors
 
-- `bend bend/App.bend --check-only` and `bunx tsc --noEmit` pass.
-- The installCheck now uses `Base`, `A`, and `B`; after changing only `B`, debug
-  evidence is `resumePrefix rank=1 remainingSteps=1` and
-  `compileSuffix steps=1 seeded=true`. An exact rerun restores the artifact;
-  the artifact runs; `cache verify` reports zero quarantined.
-- Manual longest-prefix test independently reproduced the same rank-1 fallback
-  and suffix length. Corrupting the longest checkpoint quarantined it with
-  `CAS payload digest mismatch`, fell back to the next valid prefix, rebuilt
-  one suffix step, and left all resulting CAS objects valid. A separate
-  corrupted-artifact test likewise quarantined and rebuilt from the final
-  checked state.
-- A writable, separate copy of `bend-categories` was tested with a wrapper that
-  imports `Category/Monoidal/Instance/Setoids.Unsafe.bend` (48-node, ~868 KiB
-  transitive source graph). After an entry-only edit, the longest prefix hit at
-  rank 0 with zero remaining import steps. Incremental wall time was **67.44s**
-  versus **148.67s** for a cold build of the exact edited source: **54.6% less
-  wall time / 2.20× throughput**. The incremental and cold artifacts were
-  byte-identical, executed successfully, and all six warm-cache objects passed
-  verification. Benchmark workspace: `/tmp/poc-bend-categories.UDtVzi`.
+- `nix build .#proof-of-compile`: `bend bend/App.bend --check-only`, all tests,
+  and the install check (Base, A, B, Main; after changing B:
+  `resumePrefix rank=1 remainingGroups=2 remainingSteps=2`, `check groups=2
+  steps=2 seeded=true`; artifact restore and run; F8; clean verify).
+- The fork's whole `tests/` corpus (1,435 files; `--check-only` on every file,
+  `-o out.js` on every file with a main, 1,888 emits), cold and then warm over
+  one shared cache: identical stdout, stderr, exit status and artifacts
+  (2,870 checks and 1,888 emits, 0 disagreements); so do bend-categories's
+  tests, `PROOF.bend` and both benchmarks (40 checks, 12 emits).
+- GC keeps each root's chain and artifact and removes the rest; `verify` stays
+  clean; a non-private cache directory fails every command.
+- `bend-categories` heavy benchmark (`HeavyBenchmark.bend` over
+  `Setoids.Unsafe.bend`: 50 files, 955 KB), with another session's checker
+  holding a core:
+
+  | Build | Wall | Peak RSS | MVP |
+  |---|---|---|---|
+  | `bend --check-only` (reference) | 6.0 s | 0.45 GB | |
+  | `poc check`, cold (50 packs sealed) | 8.6–8.9 s | 0.76–0.80 GB | 148.7 s cold build |
+  | `poc check`, entry-only edit | 1.1–1.3 s | 0.43–0.48 GB | 67.4 s |
+  | `poc check`, no-op | 1.0–1.2 s | 0.40–0.44 GB | |
+  | `poc build`, after an edit (replay of what `main` reaches) | 1.4–1.5 s | 0.41–0.49 GB | |
+  | `poc build`, no-op (artifact restored) | 1.3 s | 0.33 GB | |
+
+  Artifacts are byte-identical to `bend -o`. Of a cold check's overhead, key
+  folding is ~0.7 s, sealing ~0.4 s (mostly the report summaries' walk of
+  elaborations), the fill scan ~0.1 s.
 
 ## Bend-2 authoring gotchas (hard-won, will bite you)
 
@@ -152,16 +163,28 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
    `import ./Host.bend as H`, used as `H.Host.read_source`. Quoted module
    imports (`import "./A.bend"`) are foreign-implementation imports, not
    module imports.
-10. **Async foreign functions deadlock the runtime.** The compiled IO loop
-    has no mechanism to await a promise except chan/time parking. We spawn a
-    synchronous child (`Bun.spawnSync`) for `book_read`.
+10. **Async foreign functions deadlock Bend's own runtime.** The compiled IO
+    loop has no mechanism to await a promise except chan/time parking. This
+    project drives `$FFI` operations from `src/cli.ts` instead, which awaits a
+    promise returned by a capability, so the checker runs in process.
 11. **`js_lib` only exports pure non-IO defs by default**, and compiling *all*
     defs can hang. Export exactly the IO entrypoint (`Cli.program`) and drive
     the `$FFI` op loop from TS.
 12. **bend-hashes BLAKE3 never terminates** in practice (tested: hangs on
-    ~200 bytes). SHA-256 via `sha2_32.bend` is ~50-100ms per `Key.*` op —
-    acceptable. **Do not import `main.bend`** (the full facade): typechecking
-    jumps from ~10s to ~4min.
+    ~200 bytes). SHA-256 comes from `sha2_32.bend`, patched to stream
+    (`nix/patches/`). **Do not import `main.bend`** (the full facade):
+    typechecking jumps from ~10s to ~4min.
+13. **Names are defined before use.** A def may only call defs above it in
+    the file; order helpers first.
+14. **A match (and a tuple destructuring) cannot take a computed value.**
+    `(a, b) = f(x)` is rejected; pass the pair to a def as a parameter and
+    destructure it there (see `SHA2_32.blocks`).
+15. **Base's string and list walks are not tail-recursive.** `String.eq`,
+    `List.append` and friends overflow the JS stack on ~100 KB inputs; write
+    accumulator-passing walks (`App.same.text`, `SHA2_32.onto`).
+16. **Constructor names are global.** `Emit` is taken by the IO runtime;
+    choose distinct names (`Emitting`).
+17. **Nat literals stop at 2^32-1**, and `U32.from_nat` wraps.
 
 ## Environment gotchas
 
@@ -172,7 +195,7 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   '/bend2/main.ts --check-only src/Categories/'` clears them; the parent
   scripts respawn, so expect recurrence.
 - Prefer fixed store paths in one-off commands to skip flake re-eval:
-  bend `/nix/store/fb1d6jdzkq0nrzdmhc0c3vn9w9x730hs-bend-2.0.25-unstable`,
+  bend `/nix/store/412w6jg0xmxppna1w41a38bm9zcpki4v-bend-2.0.25-unstable` (fork `80ffd6d1`),
   bun `/nix/store/9nmsidbfpjv43b5pzw0sbhpaz6mgc9v8-bun-1.4.2` (re-derive with
   `nix build` if inputs change).
 - `warning: SQLite database '/nix/var/nix/db/db.sqlite' is busy` is harmless
@@ -185,42 +208,40 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
 nix build .#proof-of-compile
 
 # Iterate on Bend source
-/nix/store/fb1d...bend.../bin/bend bend/App.bend --check-only
+$(nix build .#bend --print-out-paths)/bin/bend bend/App.bend --check-only
 
 # Rebuild the compiled library used by the CLI
-bun src/build-bend-lib.ts /nix/store/fb1d.../share/bend/bend2 bend/App.bend dist/app-lib.js
+bun src/build-bend-lib.ts "$BEND2_SRC" bend/App.bend dist/app-lib.js
 
 # Run the CLI directly
 POC_APP_LIB=$PWD/dist/app-lib.js \
-POC_BEND2_SOURCE=/nix/store/fb1d.../share/bend/bend2 \
+POC_BEND2_SOURCE="$BEND2_SRC" \
 POC_HASHES_SOURCE=$(realpath vendor/bend-hashes) \
+bun src/cli.ts check path/to/Main.bend
 bun src/cli.ts build path/to/Main.bend --output out.js --target js
 bun src/cli.ts cache status|verify|gc
 
-# TS typecheck
+# TS typecheck and tests (acceptance needs the CLI environment above and BEND)
 bunx tsc --noEmit
+BEND=$(nix build .#bend --print-out-paths)/bin/bend bun test
+
+# Cold equivalence over the fork's corpus
+bun tools/cold-equivalence.ts --emit --rounds 2 ~/Work/bend/tests
 ```
 
-`POC_DEBUG=1` turns on host-call tracing and reports the selected prefix rank,
-remaining suffix length, and whether suffix compilation was seeded.
+`POC_DEBUG=1` turns on host-call tracing and reports the rank of the resumed
+boundary, the remaining groups and steps, and whether the check was seeded.
 
-## Next steps (priority order)
+## Next steps (decisions first)
 
-1. **Categorical proofs via bend-categories.** Model the Merkle functor
-   (`F(X) = 1 + (String×String) + (String×String×X×X)`), show `Merkle` is its
-   initial algebra and `Merkle.digest` the mediating morphism into the Digest
-   algebra; frame `Sequence.snoc` folds and the key constructors as algebra
-   structure maps. `Functor/Algebra.bend` (safe F-algebra records) and
-   `Category/Construction/F-Algebras.Unsafe.bend` (the category + laws) in the
-   vendored `bend-categories` source are the entry points. **Remove the
-   dependency before publishing** (hard user requirement).
-2. **Hub imports** (`0x...`): parsed and keyed (`Key.import_hub`) but resolve
-   to no target; needs real hub resolution at the host boundary.
-3. **GC manifests.** `cacheGc` only removes temp files; Bend should emit the
-   live-key set per build (e.g. per-entry manifests) so GC can prove
-   unreachability instead of guessing.
-4. **Cheaper stability recheck.** Currently rebuilds the whole graph after a
-   miss to prove inputs didn't change mid-compile; correct but 2× graph cost
-   on cold builds.
-5. Publishing cleanup: decide fate of `POC_DEBUG` proxy, `dist/` artifacts,
-   and the `vendor/` symlink.
+1. **Push fork `16379eb7`** (book_valid's replay) to
+   `o1lo01ol1o/bend/expose-book-state-api`, point `bend-src` back at GitHub,
+   and `nix flake update bend-src`.
+2. **Trust (b):** signatures from a signer process that never evaluates code.
+3. Hashing throughput is decided (keep the rule; ~0.6 s/MB of source per
+   build); revisit only with a faster Bend SHA-256.
+4. **Report duplication:** export a summary-parameterised `cli_report` from
+   the fork and drop the mirror in `src/compiler.ts`.
+5. **Categorical proofs via bend-categories** (the spec's proof-scope
+   decision). **Remove the dependency before publishing.**
+6. Publishing cleanup: `POC_DEBUG`, `dist/`, the `vendor/` symlink.

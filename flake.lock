@@ -50,18 +50,18 @@
     "bend-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790163302,
-        "narHash": "sha256-FPoKiuskP85aG9a/MDGcWMetz2mVNvd0vJOpJKEu9D0=",
-        "owner": "o1lo01ol1o",
-        "repo": "bend",
-        "rev": "80ffd6d16371e952706cb43fa980039c48549af7",
-        "type": "github"
+        "lastModified": 1790171662,
+        "narHash": "sha256-/denwHETYpZJf2qAh+33+j5bMFuwgbTWL8wQGl0WVaM=",
+        "ref": "expose-book-state-api",
+        "rev": "16379eb70f1e1c0c28481e6b8d24fe68c24bd45b",
+        "revCount": 3020,
+        "type": "git",
+        "url": "file:///Users/timpierson/Work/bend"
       },
       "original": {
-        "owner": "o1lo01ol1o",
         "ref": "expose-book-state-api",
-        "repo": "bend",
-        "type": "github"
+        "type": "git",
+        "url": "file:///Users/timpierson/Work/bend"
       }
     },
     "cachix": {

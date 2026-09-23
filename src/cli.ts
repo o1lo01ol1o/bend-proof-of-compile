@@ -53,9 +53,12 @@ if (typeof program !== "function") {
 }
 
 const action = program(toBendList(process.argv.slice(2))) as BendAction;
-runIo(action);
+await runIo(action);
 
-function runIo(action: BendAction): void {
+// Drives the compiled program's effects. A capability completes either
+// synchronously or, like the checker's loader, with a promise that the loop
+// awaits before resuming the continuation.
+async function runIo(action: BendAction): Promise<void> {
   let operation = action((value: unknown): BendOperation => ({ $: "Emit", value }));
   for (;;) {
     if (operation.$ === "Emit") {
@@ -80,7 +83,8 @@ function runIo(action: BendAction): void {
     if (need.time || need.read) {
       throw new Error("proof-of-compile host received an unsupported asynchronous IO effect");
     }
-    const value = operation.run(...(operation.args ?? []), operation.kont);
+    const returned = operation.run(...(operation.args ?? []), operation.kont);
+    const value = returned instanceof Promise ? await returned : returned;
     if (value === undefined) {
       throw new Error("proof-of-compile host effect did not complete synchronously");
     }

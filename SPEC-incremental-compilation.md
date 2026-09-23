@@ -132,19 +132,50 @@ Bend emits the live-key set per build (the MVP's next step 3); host GC deletes o
 ## Milestones
 
 1. **Import the fork** (this branch, done): `bend-src` is pinned to the fork's `80ffd6d1`, and the MVP builds and passes its install check unchanged. When milestone 3 starts calling `Main.book_over` and `Main.book_flat`, `src/compiler.ts`'s capability check adds them.
-2. **Load order and keys:** `Host.load_steps`, chain keys in Bend, removal of `Source.bend` import parsing and the path and namespace rules, the traversal-only stability recheck.
-3. **Resumption:** `book_over` in `Host.book_read_suffix`, per-step boundaries from `on`, the sealing rule, and one TODO judgment of the entry's final state (F8).
-4. **Stored states:** the codec of 4 (dropping `e`), lazy restore, packs, golden vectors.
-5. **Compilation:** the first version of 5; then the chosen next step.
-6. **Trust and GC:** 7 and 8.
-7. **Acceptance:** the measurements above.
+2. **Load order and keys** (done): `Host.load_steps`, chain keys in Bend, removal of `Source.bend` import parsing and the path and namespace rules, the traversal-only stability recheck.
+3. **Resumption** (done): `book_over` in `Host.book_check`, per-step boundaries from `on`, the sealing rule, and one TODO judgment of the entry's final state (F8).
+4. **Stored states** (done): the codec of 4 (dropping `e`), lazy restore, packs, golden vectors.
+5. **Compilation** (done: the first version, then re-elaboration of what `main` reaches, fork `16379eb7`): the first version of 5; then the chosen next step.
+6. **Trust and GC** (done, trust as (a)): 7 and 8.
+7. **Acceptance** (done; results below): the measurements above.
+
+## As built (milestones 2–7)
+
+Where the implementation settles something this spec left open, or departs from it:
+
+- **One `book_over` child per sealed group, not one per suffix.** A child's own tables are its records only if it checks one step's events: in a single child over the whole suffix, an instance minted while checking step j+1 cannot be attributed to a step, and a state sealed at j that kept it would number later instances differently from cold. Each group loads with the `on` hook parsing its own files and skipping (then forgetting) every later file, then `book_valid`s; its pack is the child's own records, so packs (4) came with this milestone. Consecutive unsealed boundaries share a group.
+- **Sealing facts come first, from a parse-only load of the whole order**, before the longest-state lookup, so only sealed boundaries are offered for resumption; a law declared before a stored boundary and filled after it with a foreign or `@unsafe` definition makes that boundary unusable for this entry even if another build sealed it. The parse costs about the spec's measured re-parse share, and is skipped when the final state or artifact is found.
+- **The PROOF.bend rule is judged by Bend on every build**, from the host's observation (`PlainEntry | ProofEntry{laws}`), after the parse pass on a miss (so a parse error still comes first, as cold) and before an artifact is restored on a hit. It is not folded into a key: a final state `P_n` stays shareable, and the verdict cannot go stale.
+- **The artifact key's foreign inputs** come from a manifest in each state's CAS metadata: the `def.i` files its whole chain names, so an artifact hit needs no restore.
+- **A step is keyed by the text the loader read** (`LoadStep{path, namespace, text}`, `Key.file_text`), the checker's actual input, rather than by base64 bytes: a quarter less to hash, nothing to encode. Every file a check reads must equal its keyed step, or it fails as unstable, so a state is never stored under inputs it was not checked from.
+- **The checker runs in the host process.** `src/cli.ts`'s IO loop awaits a capability that returns a promise, so `book_load` is called directly; the per-step child process and its seed encode/decode are gone.
+- **The stability recheck compares observations, not chains.** The second walk's files, namespaces, texts and PROOF.bend observation must equal the first's, compared in Bend by tail calls (base `String.eq` is not tail-recursive and overflows on a 200 KB file). Equal observations fold to the same chain, and comparing costs a fraction of folding again; it also covers a `LAWS.bend` appearing mid-build, which the chain does not.
+- **Hashing is faster, still through bend-hashes.** The vendored SHA-224/256 read a block's words by indexed list reads and rebuilt its schedule list per word (about 0.24 MB/s). `nix/patches/bend-hashes-sha2_32-streaming.patch` replaces its internals, keeping its functions and digests: words read four bytes at a time, a sixteen-word window sliding one word per round, constant shifts, tail calls only (about 1.6 MB/s; `test/sha.test.ts` checks it against Node's on NIST vectors and every padding length).
+- **Packs (4).** A stored definition keeps its lowered type and body, flags (foreign paths as realpaths) and `r`, the report's summary: the names its types and elaboration refer to. Elaborations are not stored (F1). Encoding is canonical (tables sorted by name) and versioned (schema 3); `test/golden/` pins it, and decode-then-encode is the identity on each golden pack. A pack also records `last`, where its last file's events begin: the loader's mark when that file is an entry, which the report needs.
+- **Restore is lazy (4).** A chain restores into one flat table of accessors: a record is raised on first read and becomes a data property, and the setter makes an assignment through a child table (a fill of a restored law) the child's own property. The report reads flags and summaries from the wire without raising anything.
+- **Compilation (5): decided, re-elaborate what `main` reaches.** A state checked from nothing in this process is emitted directly. A state with restored records is replayed: `book_valid(book, 0, only)` (fork `16379eb7`) reveals every event in order as a cold check does, checks only the events in `only`, and, during the replay, re-elaborates a stored instance at its first call. `only` is what `main` reaches through the records' summaries, closed under the callers of every template instance in it, so each instance's earliest caller is replayed and re-elaborates it at the view that minted it cold (a law filled between an instance's mint and a later call would otherwise change its elaboration). The first version (a cold emit) came first and was replaced. Artifacts carry the report of the build that made them, so an artifact hit notes it again; `poc check ENTRY` is the check-only workload.
+- **Why not stored elaborations.** Elaborations are not data: on the heavy benchmark they hold 87,121 closures (`All.B`, `Lam.f`) among 1.35 M shared nodes, so storing them needs the kernel's level-preserving raise and lower plus a sharing-preserving encoding (88 MB of JSON, 9 MB gzipped, ~1.4 s to encode, for that one entry), where the replay needed a filter and keeps "zero elaboration bytes stored".
+- **Reports and the output rule are the checker's.** `poc check` prints `cli_report`'s text on stdout and `poc build` notes it on stderr, from the entry's own claims (`n0`), with promises flooded back through the summaries; `poc build` refuses an output that is a loaded file, a foreign file or a directory, with the checker's text.
+- **Trust (7) is (a), a single-user store:** the cache directories must be owned by the user with mode 0700, or every command fails. (b) needs a separate signer process and remains open.
+- **GC (8).** Each build records its live keys (the final state; and the artifact when it emits) under a root Bend names per entry and purpose (`Key.root`); `poc cache gc` takes the union of all roots, keeps each live state's chain of packs, and deletes every other object. Packs are published parents first. A build racing GC can lose a parent it meant to extend; the chain then fails to restore, which is a miss.
+- Removed with the second import parser: `--base` (the checker always loads its own `base.bend`), `Host.realpath`, `Host.resolve`, `Host.read_source`, `Host.default_base`. The cache moved to `v2`; CAS metadata is schema 2.
+- **Report duplication.** The report mirrors `main.ts`'s `cli_report` over summaries (`src/compiler.ts`), because the fork does not export it and restored records have no elaborations to walk. Exporting a summary-parameterised report from the fork would leave one implementation.
+
+## Acceptance results
+
+- **Cold equivalence.** The fork's whole `tests/` corpus, cold then warm over one shared cache (`tools/cold-equivalence.ts`): 2,870 `--check-only` comparisons and 1,888 `-o out.js` comparisons, byte-identical stdout, stderr, exit status and artifacts. bend-categories' tests, `PROOF.bend` and benchmarks: 40 and 12, identical. The histories (entry edit, final-module edit, failed extension, symlink retarget, `LAWS.bend` appearing, branch from an old state, law filled later, open law and hole prefixes) are `test/acceptance.test.ts`, each step against the CLI.
+- **Restart.** Every history step is its own process; a second entry restores the first's prefix states.
+- **Resources** (bend-categories heavy benchmark, 50 files, 955 KB, cold `--check-only` 6.0 s and 0.45 GB; the private workload was not available here): peak RSS at most 1.8× a cold check's (met); an entry-only edit checks in 1.1–1.3 s (19–21% of a full check, most of it key folding over 955 KB of text); a cold check with every boundary sealed takes 8.6–8.9 s, so persistence overhead is about 40% on this text-heavy, check-light workload (not met here: key folding ~0.7 s, sealing ~0.4 s); the `HANDOFF.md` benchmark (MVP 67 s / 148 s) is now 1.1–1.3 s / 8.6 s for a check, and 8.2 s for a build after an edit, a figure from 5's first version (a cold emit); with the replay, a build after an entry edit takes 1.4–1.5 s (JS and C byte-identical to `bend -o`).
+- **Structure.** Zero copies of parent records (children are `book_over` tables); zero re-checked prefix events (a group loads only its own files); zero elaboration bytes stored (the codec tests assert it).
 
 ## Open decisions
 
-- **Compilation after restore (5):** re-elaborate reachable definitions, or store elaborations with a level-preserving raise. The first keeps the store small; the second keeps incremental builds fast when `main` reaches most of the prefix.
-- **Trust (7):** single-user or signed.
+- **Hashing throughput: decided** — keep the rule and accept the cost. Keys over file text are computed in pure Bend with bend-hashes (streaming patch): about 0.6 s per MB of source per build, most of a no-op or entry-only build's time on text-heavy, check-light workloads such as the bend-categories heavy benchmark, where the 10% overhead target is therefore not met. Not taken: host-supplied digests (break the rule) and digests remembered by file stat (a hit would mean "stat matched", not "these bytes").
+
+- **Compilation after restore (5): decided** — re-elaborate what `main` reaches (see As built). A build after an edit re-checks that much of the prefix; when `main` reaches most of a large prefix, it approaches a cold check.
+- **Trust (7):** (a) single-user is implemented; (b) signed remains open.
 - **Proof scope:** which properties of the key algebra (`Merkle.bend`'s catamorphism, the prefix chain) the `bend-categories` proofs cover.
 
 ## Importing the fork commits
 
-`bend-src` follows `github:o1lo01ol1o/bend/expose-book-state-api`, locked at `80ffd6d1` through `flake.lock`. A later fork commit comes in with `nix flake update bend-src`.
+`bend-src` follows the fork's `expose-book-state-api` branch. It is locked at `16379eb7` (book_valid's replay) from the local checkout (`git+file:///Users/timpierson/Work/bend`) until that commit is pushed; then the input returns to `github:o1lo01ol1o/bend/expose-book-state-api`. A later fork commit comes in with `nix flake update bend-src`.

@@ -18,7 +18,9 @@
 
     bend-src = {
       # The fork's checker capability (SPEC-incremental-compilation.md).
-      url = "github:o1lo01ol1o/bend/expose-book-state-api";
+      # Local until 16379eb7 (book_valid's replay) is pushed; then
+      # github:o1lo01ol1o/bend/expose-book-state-api again.
+      url = "git+file:///Users/timpierson/Work/bend?ref=expose-book-state-api";
       flake = false;
     };
 
@@ -117,6 +119,10 @@
             pname = "bend-hashes";
             version = "0-unstable";
             src = bend-hashes-src;
+            # A streaming SHA-224/256: same functions and digests, a constant
+            # number of steps per block (test/sha.test.ts checks it against
+            # Node's). Every cache key goes through it.
+            patches = [ ./nix/patches/bend-hashes-sha2_32-streaming.patch ];
 
             dontBuild = true;
             installPhase = ''
@@ -142,7 +148,7 @@
               let
                 relative = nixpkgs.lib.removePrefix "${self.outPath}/" (toString path);
               in
-              type == "directory" || builtins.match "(bend|foreign|src)(/.*)?" relative != null;
+              type == "directory" || builtins.match "(bend|foreign|src|test)(/.*)?" relative != null;
           };
           proofOfCompile = pkgs.stdenvNoCC.mkDerivation {
             pname = "proof-of-compile";
@@ -165,6 +171,14 @@
                 ${bend}/share/bend/bend2 \
                 bend/App.bend \
                 dist/app-lib.js
+
+              # Codec laws and golden vectors, the hash against Node's, and
+              # incremental histories against the pinned checker's CLI.
+              POC_APP_LIB="$PWD/dist/app-lib.js" \
+              POC_BEND2_SOURCE=${bend}/share/bend/bend2 \
+              POC_HASHES_SOURCE=${bendHashes}/share/bend/hashes \
+              BEND=${bend}/bin/bend \
+                bun test
 
               runHook postBuild
             '';
@@ -214,22 +228,44 @@
                 --output "$TMPDIR/output.js" --target js \
                 | grep -q 'built and cached artifact'
 
-              # Invalidate only the last direct import. The longest valid
-              # prefix is Base + A, so exactly B must be rechecked.
+              # The load order is Base, A, B, Main. Changing B keeps the
+              # state after Base and A, so only B and Main are checked.
               printf '\n# changed after prefix checkpoint\n' >> "$TMPDIR/project/B.bend"
               POC_DEBUG=1 "$out/bin/proof-of-compile" build \
                 "$TMPDIR/project/Main.bend" \
                 --output "$TMPDIR/output.js" --target js \
                 > "$TMPDIR/rebuild.out" 2> "$TMPDIR/rebuild.err"
               grep -q 'built and cached artifact' "$TMPDIR/rebuild.out"
-              grep -q 'resumePrefix rank=1 remainingSteps=1' "$TMPDIR/rebuild.err"
-              grep -q 'compileSuffix steps=1 seeded=true' "$TMPDIR/rebuild.err"
+              grep -q 'resumePrefix rank=1 remainingGroups=2 remainingSteps=2' "$TMPDIR/rebuild.err"
+              grep -q 'check groups=2 steps=2 seeded=true' "$TMPDIR/rebuild.err"
 
               rm "$TMPDIR/output.js"
               "$out/bin/proof-of-compile" build "$TMPDIR/project/Main.bend" \
                 --output "$TMPDIR/output.js" --target js \
                 | grep -q 'restored artifact from cache'
               bun "$TMPDIR/output.js" | grep -q 'proof-of-compile smoke test'
+
+              # A law declared in one file and filled in a later one: the
+              # earlier state is sealed with the law open, and only the
+              # entry's final state is judged, as in a cold check.
+              mkdir -p "$TMPDIR/laws"
+              cat > "$TMPDIR/laws/P.bend" <<'EOF'
+              import Base
+              law L: Nat
+              EOF
+              cat > "$TMPDIR/laws/A.bend" <<'EOF'
+              import Base
+              import ./P.bend as P
+              def P.L():
+                7n
+              def main() -> IO(Unit):
+                IO.print("law filled later")
+              EOF
+              "$out/bin/proof-of-compile" build "$TMPDIR/laws/A.bend" \
+                --output "$TMPDIR/laws.js" --target js \
+                | grep -q 'built and cached artifact'
+              bun "$TMPDIR/laws.js" | grep -q 'law filled later'
+
               "$out/bin/proof-of-compile" cache verify | grep -q '"quarantined":0'
 
               runHook postInstallCheck
