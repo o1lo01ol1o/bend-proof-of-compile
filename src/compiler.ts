@@ -129,6 +129,20 @@ export interface LateFill {
 
 export type Target = "js" | "c";
 
+export type Role = "entry" | "module";
+
+// The namespace a sibling importer gives a file: the loader's own
+// computation for `import ./X.bend` from a file loaded under "" (bend.ts
+// book_load: sub = join(dirname(ns), normalize(rel)) without ".bend").
+export function moduleNamespace(file: string): string {
+  const name = path.basename(file);
+  if (!name.endsWith(".bend")) {
+    throw new PocError("CLI_USAGE", `a module is a .bend file: ${file}`);
+  }
+  const rel = path.posix.normalize(`./${name}`);
+  return path.posix.join(path.posix.dirname(""), rel).replace(/\.bend$/, "");
+}
+
 export interface Verdict {
   readonly todos: number;
   readonly reliant: readonly string[];
@@ -147,17 +161,19 @@ export interface CompilerRuntime {
   readonly Comp: CompModule;
   // A cold check of one file, as `bend FILE --check-only` does it.
   bookRead(file: string): Promise<CheckedBookStateLike>;
-  // The load order, walked by the checker's loader without parsing.
-  loadSteps(entry: string): Promise<LoadOrder>;
+  // The load order, walked by the checker's loader without parsing, with the
+  // root loaded as the entry or as a module (see moduleNamespace).
+  loadSteps(entry: string, role: Role): Promise<LoadOrder>;
   // Parses, without checking, the load order rooted at `root`, which must be
   // `steps`, and reports every law filled in a later step than its own.
-  loadFills(root: string, steps: readonly LoadStep[]): Promise<LateFill[]>;
+  loadFills(root: string, namespace: string, steps: readonly LoadStep[]): Promise<LateFill[]>;
   // Checks `groups` in order, each in a book_over child of the state before
   // it, and passes each checked state to `seal` with `last`, the order index
   // where the group's last file begins. The result is the last state, whose
   // tables stay chained to the seed's.
   check(
     root: string,
+    namespace: string,
     groups: readonly CheckGroup[],
     seed: BookStateLike | undefined,
     seal: (key: string, parent: BookStateLike, child: BookStateLike, last: number) => void,
@@ -340,10 +356,11 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
         throw rejected(cause, { file });
       }
     },
-    async loadSteps(entry) {
+    async loadSteps(entry, role) {
       const steps: LoadStep[] = [];
+      const namespace = role === "entry" ? "" : moduleNamespace(entry);
       try {
-        await Bend.book_load(Bend.book_nil(), entry, "", new Map(), undefined, (real, namespace, text) => {
+        await Bend.book_load(Bend.book_nil(), entry, namespace, new Map(), undefined, (real, namespace, text) => {
           steps.push({ path: real, namespace, text });
           return true;
         });
@@ -351,7 +368,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
         // The walk parses nothing, so it can meet a load error past a parse
         // error that a cold check reports first. Report the cold one.
         try {
-          await Bend.book_load(Bend.book_nil(), entry, "", new Map());
+          await Bend.book_load(Bend.book_nil(), entry, namespace, new Map());
         } catch (cause) {
           throw rejected(cause, { entry });
         }
@@ -367,11 +384,11 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
         : { $: "ProofEntry", laws: fs.existsSync(laws) ? fs.realpathSync(laws) : null };
       return { imports: steps, entry: entryStep, rule };
     },
-    async loadFills(root, steps) {
+    async loadFills(root, namespace, steps) {
       const book = Bend.book_nil();
       const starts: number[] = [];
       try {
-        await Bend.book_load(book, root, "", new Map(), undefined, (real, namespace, text) => {
+        await Bend.book_load(book, root, namespace, new Map(), undefined, (real, namespace, text) => {
           expectStep(steps[starts.length], real, namespace, text);
           starts.push(book.order.length);
           return false;
@@ -406,7 +423,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
       }
       return fills;
     },
-    async check(root, groups, seed, seal) {
+    async check(root, namespace, groups, seed, seal) {
       let parent: BookStateLike = seed ?? { book: Bend.book_nil(), seen: new Map() };
       const seen = new Map(parent.seen);
       let last = parent.book.order.length;
@@ -415,21 +432,21 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
           const book = Main.book_over(parent.book);
           const done = book.order.length;
           const skipped: string[] = [];
-          let loaded = 0;
-          await Bend.book_load(book, root, "", seen, undefined, (real, namespace, text) => {
+          let count = 0;
+          await Bend.book_load(book, root, namespace, seen, undefined, (real, loaded, text) => {
             // Files before the group are already seen. The loader reaches the
             // group's files next, in order; later files are left unparsed
             // and forgotten, so the next group loads them.
-            if (loaded < group.steps.length) {
-              expectStep(group.steps[loaded], real, namespace, text);
-              loaded += 1;
+            if (count < group.steps.length) {
+              expectStep(group.steps[count], real, loaded, text);
+              count += 1;
               last = book.order.length;
               return false;
             }
             skipped.push(real);
             return true;
           });
-          if (loaded !== group.steps.length) {
+          if (count !== group.steps.length) {
             throw unstable();
           }
           for (const real of skipped) {

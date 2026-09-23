@@ -108,9 +108,9 @@ function host_compiler_inputs() {
   });
 }
 
-function host_load_steps(entry) {
+function host_load_steps(entry, role) {
   return poc_await(async () => {
-    const order = await poc_host().loadSteps(entry);
+    const order = await poc_host().loadSteps(entry, role.$ === "AsModule" ? "module" : "entry");
     return {
       $: "LoadOrder",
       imports: poc_list(order.imports, poc_load_step),
@@ -120,10 +120,11 @@ function host_load_steps(entry) {
   });
 }
 
-function host_load_fills(root, steps) {
+function host_load_fills(root, namespace, steps) {
   return poc_await(async () => {
     const fills = await poc_host().loadFills(
       root,
+      namespace,
       poc_list_to_array(steps).map(poc_step_from_bend),
     );
     return poc_list(fills, poc_late_fill);
@@ -184,11 +185,12 @@ function host_stage_abort(stage) {
   return { $: "Unit" };
 }
 
-function host_book_check(cache, root, groups, seed, stage) {
+function host_book_check(cache, root, namespace, groups, seed, stage) {
   return poc_await(async () => {
     const checked = await poc_host().bookCheck(
       cache,
       root,
+      namespace,
       poc_groups_to_host(groups),
       seed.$ === "Some" ? seed.value.token : undefined,
       stage.token,

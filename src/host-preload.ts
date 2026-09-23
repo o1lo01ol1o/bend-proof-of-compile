@@ -19,6 +19,7 @@ import {
   type LateFill,
   type LoadOrder,
   type LoadStep,
+  type Role,
   type Target,
   type Verdict,
 } from "./compiler.ts";
@@ -72,8 +73,8 @@ interface StateStage {
 interface HostApi {
   cacheRoot(namespace: string, version: string): string;
   compilerInputs(): { compiler: readonly NamedBytes[]; hashes: readonly NamedBytes[] };
-  loadSteps(entry: string): Promise<LoadOrder>;
-  loadFills(root: string, steps: readonly LoadStep[]): Promise<LateFill[]>;
+  loadSteps(entry: string, role: Role): Promise<LoadOrder>;
+  loadFills(root: string, namespace: string, steps: readonly LoadStep[]): Promise<LateFill[]>;
   stateGet(cache: string, key: string): { readonly state: HeldState; readonly verdict: Verdict } | null;
   stateGetLongest(
     cache: string,
@@ -86,6 +87,7 @@ interface HostApi {
   bookCheck(
     cache: string,
     root: string,
+    namespace: string,
     groups: readonly CheckGroup[],
     seed: HeldState | undefined,
     stage: StateStage,
@@ -137,12 +139,12 @@ globalThis.POC_HOST = {
     return memoizedInputs;
   },
 
-  loadSteps(entry) {
-    return runtime.loadSteps(entry);
+  loadSteps(entry, role) {
+    return runtime.loadSteps(entry, role);
   },
 
-  loadFills(root, steps) {
-    return runtime.loadFills(root, steps);
+  loadFills(root, namespace, steps) {
+    return runtime.loadFills(root, namespace, steps);
   },
 
   stateGet(cache, key) {
@@ -204,7 +206,7 @@ globalThis.POC_HOST = {
     }
   },
 
-  async bookCheck(cache, root, groups, seed, stage) {
+  async bookCheck(cache, root, namespace, groups, seed, stage) {
     assertOpenStage(stage);
     debug(
       `check groups=${groups.length} steps=${stepCount(groups)} seeded=${seed !== undefined}`,
@@ -215,7 +217,7 @@ globalThis.POC_HOST = {
         keys.set(seed, seed);
       }
       const elaborations = seed === undefined ? "complete" : "restored";
-      const checked = await runtime.check(root, groups, seed, (key, parent, child, last) => {
+      const checked = await runtime.check(root, namespace, groups, seed, (key, parent, child, last) => {
         const held = keys.get(parent);
         const foreigns = mergeForeigns(held?.foreigns ?? [], ownForeigns(child));
         stageState(stage, cache, key, encodePack(runtime, held?.key ?? null, parent, child, last), {

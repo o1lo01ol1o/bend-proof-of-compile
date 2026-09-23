@@ -78,9 +78,16 @@ def Host.compiler_inputs() -> IO(Result<&2, &2, String, CompilerInputs>):
   import "../foreign/host.c"
   import "../foreign/host.js"
 
+# How the root file is loaded: as the entry (namespace ""), or as a module,
+# under the namespace a sibling importer gives it (`import ./X.bend` loads
+# X.bend as `X`), so its final state is the prefix that importer resumes from.
+type Role is Data:
+  AsEntry{}
+  AsModule{}
+
 # The checker's own loader walks the import graph without parsing. It is the
 # only import parser: this application never reads import syntax.
-def Host.load_steps(entry: String) -> IO(Result<&2, &2, String, LoadOrder>):
+def Host.load_steps(entry: String, role: Role) -> IO(Result<&2, &2, String, LoadOrder>):
   import "../foreign/host.c"
   import "../foreign/host.js"
 
@@ -89,6 +96,7 @@ def Host.load_steps(entry: String) -> IO(Result<&2, &2, String, LoadOrder>):
 # that declares them.
 def Host.load_fills(
   root: String,
+  namespace: String,
   steps: List<&2, LoadStep>
 ) -> IO(Result<&2, &2, String, List<&2, LateFill>>):
   import "../foreign/host.c"
@@ -132,11 +140,13 @@ def Host.stage_abort(stage: Stage) -> IO(Unit):
   import "../foreign/host.js"
 
 # Compiler boundary. This is the only operation that invokes Bend's checker.
-# `root` is the entry's realpath; `seed` is the state the first group extends.
+# `root` is the entry's realpath, loaded under `namespace`; `seed` is the state
+# the first group extends.
 # The result is the final state, the stage, and the verdict on the final state.
 def Host.book_check(
   cache: String,
   root: String,
+  namespace: String,
   groups: List<&2, CheckGroup>,
   seed: Maybe<&1, Checkpoint>,
   stage: Stage

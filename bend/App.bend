@@ -39,27 +39,36 @@ type Mode is Data:
 
 # One build's fixed context.
 type Build is Data:
-  Build{entry: String, cache: String, compiler: M.Digest, mode: Mode}
+  Build{entry: String, role: H.Role, cache: String, compiler: M.Digest, mode: Mode}
 
 def App.entry(+build: Build) -> String:
   match build:
-    case Build{entry, cache, compiler, mode}:
+    case Build{entry, role, cache, compiler, mode}:
       entry
 
 def App.cache(+build: Build) -> String:
   match build:
-    case Build{entry, cache, compiler, mode}:
+    case Build{entry, role, cache, compiler, mode}:
       cache
 
 def App.compiler(+build: Build) -> M.Digest:
   match build:
-    case Build{entry, cache, compiler, mode}:
+    case Build{entry, role, cache, compiler, mode}:
       compiler
 
 def App.mode(+build: Build) -> Mode:
   match build:
-    case Build{entry, cache, compiler, mode}:
+    case Build{entry, role, cache, compiler, mode}:
       mode
+
+def App.role(+build: Build) -> H.Role:
+  match build:
+    case Build{entry, role, cache, compiler, mode}:
+      role
+
+# The load order of this build's root, as the checker's loader walks it.
+def App.walk(+build: Build) -> IO(Result<&2, &2, String, H.LoadOrder>):
+  H.Host.load_steps(App.entry(build), App.role(build))
 
 def App.output(+emission: Emission) -> String:
   match emission:
@@ -101,6 +110,11 @@ def App.step.path(+step: H.LoadStep) -> String:
   match step:
     case H.LoadStep{path, namespace, text}:
       path
+
+def App.step.namespace(+step: H.LoadStep) -> String:
+  match step:
+    case H.LoadStep{path, namespace, text}:
+      namespace
 
 def App.link(prefix: M.Digest, step: H.LoadStep) -> M.Digest:
   M.Load.snoc(prefix, App.step.key(step))
@@ -571,10 +585,18 @@ def App.purpose(mode: Mode) -> String:
     case Emitting{Emission{output, target}}:
       target
 
+# A file checked as a module keeps its own root: its state is not the entry's.
+def App.purpose.role(role: H.Role, +purpose: String) -> String:
+  match role:
+    case H.AsEntry{}:
+      purpose
+    case H.AsModule{}:
+      String.append("module-", purpose)
+
 def App.root(+build: Build, +order: H.LoadOrder) -> String:
   M.Digest.hex(M.Key.root(
     App.step.path(App.order.entry(order)),
-    App.purpose(App.mode(build))
+    App.purpose.role(App.role(build), App.purpose(App.mode(build)))
   ))
 
 # Records what this build keeps alive. Losing the record only lets GC reclaim
@@ -783,7 +805,7 @@ def App.checked(
     case Done{triple}:
       (state, stage, verdict) = triple
       do IO<Unit>:
-        walked : Result<&2, &2, String, H.LoadOrder> <- H.Host.load_steps(App.entry(build))
+        walked : Result<&2, &2, String, H.LoadOrder> <- App.walk(build)
         App.checked.stable(
           build,
           order,
@@ -806,6 +828,7 @@ def App.check(
     checked : Result<&2, &1, String, H.Checkpoint & H.Stage & H.Verdict> <- H.Host.book_check(
       App.cache(build),
       App.step.path(App.order.entry(order)),
+      App.step.namespace(App.order.entry(order)),
       groups,
       seed,
       stage
@@ -886,6 +909,7 @@ def App.miss(
       do IO<Unit>:
         fills : Result<&2, &2, String, List<&2, H.LateFill>> <- H.Host.load_fills(
           App.step.path(App.order.entry(order)),
+          App.step.namespace(App.order.entry(order)),
           List.append(&2, H.LoadStep, App.order.imports(order), App.order.entry(order) <> Nil{})
         )
         App.filled(build, order, latest, final, stage, fills)
@@ -945,7 +969,7 @@ def App.state_found(
     case Done{Some{pair}}:
       (state, verdict) = pair
       do IO<Unit>:
-        walked : Result<&2, &2, String, H.LoadOrder> <- H.Host.load_steps(App.entry(build))
+        walked : Result<&2, &2, String, H.LoadOrder> <- App.walk(build)
         App.state.stable(build, order, final, state, verdict, App.stable(order, walked))
 
 def App.state_get(
@@ -990,7 +1014,7 @@ def App.artifact_restored(
       App.fail(error)
     case Done{Some{reliant}}:
       do IO<Unit>:
-        walked : Result<&2, &2, String, H.LoadOrder> <- H.Host.load_steps(App.entry(build))
+        walked : Result<&2, &2, String, H.LoadOrder> <- App.walk(build)
         App.restored.stable(App.output(emission), reliant, App.stable(order, walked))
     case Done{None{}}:
       App.state_get(build, order, latest, final)
@@ -1100,6 +1124,7 @@ def App.walked(
 
 def App.compiler_ready(
   +entry: String,
+  +role: H.Role,
   +cache: String,
   +mode: Mode,
   result: Result<&2, &2, String, H.CompilerInputs>
@@ -1109,13 +1134,13 @@ def App.compiler_ready(
       App.fail(error)
     case Done{inputs}:
       do IO<Unit>:
-        order : Result<&2, &2, String, H.LoadOrder> <- H.Host.load_steps(entry)
-        App.walked(Build{entry, cache, App.compiler_key(inputs), mode}, order)
+        order : Result<&2, &2, String, H.LoadOrder> <- H.Host.load_steps(entry, role)
+        App.walked(Build{entry, role, cache, App.compiler_key(inputs), mode}, order)
 
-def App.build(+entry: String, +cache: String, +mode: Mode) -> IO(Unit):
+def App.build(+entry: String, +role: H.Role, +cache: String, +mode: Mode) -> IO(Unit):
   do IO<Unit>:
     inputs : Result<&2, &2, String, H.CompilerInputs> <- H.Host.compiler_inputs()
-    App.compiler_ready(entry, cache, mode, inputs)
+    App.compiler_ready(entry, role, cache, mode, inputs)
 
 # CLI
 # ---
@@ -1161,7 +1186,7 @@ def Cli.build.options(
 ) -> IO(Unit):
   match args:
     case Nil{}:
-      App.build(entry, cache, Emitting{Emission{output, target}})
+      App.build(entry, H.AsEntry{}, cache, Emitting{Emission{output, target}})
     case "--output" <> value <> rest:
       Cli.build.options(rest, entry, cache, value, target)
     case "--target" <> "js" <> rest:
@@ -1173,8 +1198,10 @@ def Cli.build.options(
 
 def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
   match args:
+    case "check" <> "--module" <> entry <> Nil{}:
+      App.build(entry, H.AsModule{}, cache, Checking{})
     case "check" <> entry <> Nil{}:
-      App.build(entry, cache, Checking{})
+      App.build(entry, H.AsEntry{}, cache, Checking{})
     case "build" <> entry <> rest:
       Cli.build.options(rest, entry, cache, "out.js", "js")
     case "cache" <> "status" <> Nil{}:
@@ -1185,7 +1212,7 @@ def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
       Cli.gc(cache)
     case _:
       App.fail(
-        "usage: poc check ENTRY | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
+        "usage: poc check [--module] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
       )
 
 def Cli.cached(args: List<&1, String>, cache: Result<&2, &2, String, String>) -> IO(Unit):

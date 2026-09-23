@@ -60,7 +60,11 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   chain and its points; sealing (F5) and grouped check plans; the verdicts
   (PROOF.bend rule, TODO count, the report text, the output rule) with the
   checker's own texts; stability by comparing a second walk's observations;
-  GC roots; the CLI (`check`, `build`, `cache status|verify|gc`).
+  GC roots; the CLI (`check [--module]`, `build`, `cache status|verify|gc`).
+  `check --module FILE` loads FILE as a sibling importer does (namespace
+  `X` for `X.bend`), so checking modules bottom-up leaves exactly the
+  prefixes their importers resume from; plain `check FILE` loads it as the
+  entry (namespace `""`), a different state.
 
 ### Foreign boundary
 
@@ -108,7 +112,9 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   --check-only` and `bend -o`: entry edit, final-module edit, failed extension,
   branch to an old state, law filled later, open law and hole prefixes,
   symlink retarget, `LAWS.bend` appearing, restart across processes, a second
-  entry sharing the prefix.
+  entry sharing the prefix, signed states, and modules checked bottom-up
+  with `--module` (each resumes from the one below; the top entry checks only
+  itself).
 - `tools/cold-equivalence.ts` — the same comparison over a whole corpus (the
   fork's `tests/`), in parallel over one shared cache, optionally in warm
   rounds.
@@ -247,6 +253,7 @@ POC_APP_LIB=$PWD/dist/app-lib.js \
 POC_BEND2_SOURCE="$BEND2_SRC" \
 POC_HASHES_SOURCE=$(realpath vendor/bend-hashes) \
 bun src/cli.ts check path/to/Main.bend
+bun src/cli.ts check --module path/to/Lemmas1.bend   # as its importers load it
 bun src/cli.ts build path/to/Main.bend --output out.js --target js
 bun src/cli.ts cache status|verify|gc
 

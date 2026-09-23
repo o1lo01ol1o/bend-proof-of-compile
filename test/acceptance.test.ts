@@ -277,5 +277,50 @@ def main() -> IO(Unit):
     const final = JSON.parse(h.poc(["cache", "verify"]).stdout) as { quarantined: number; untrusted: number };
     expect(final).toMatchObject({ quarantined: 0, untrusted: 0 });
   }, 180_000);
+
+  test("modules checked bottom-up are the prefixes their importers resume from", () => {
+    const h = new History();
+    h.write("P.bend", P);
+    h.write("M.bend", `import Base
+import ./P.bend as P
+
+def P.L():
+  5n
+
+def middle() -> Nat:
+  Nat.add(P.L(), P.base_value())
+`);
+    h.write("E.bend", `import Base
+import ./P.bend as P
+import ./M.bend as M
+
+def main() -> IO(Unit):
+  IO.print(Nat.show(M.middle()))
+`);
+    const traced = (args: string[]): Run & { trace: string } => {
+      const result = h.poc(args, true);
+      return { ...result, trace: result.stderr };
+    };
+    // A module's verdict is the checker's on a sibling root that imports it.
+    const asImported = (file: string): Run => {
+      const name = file.replace(/\.bend$/, "");
+      h.write(`Root${name}.bend`, `import ./${file} as ${name}\n`);
+      return run([bend, `Root${name}.bend`, "--check-only"], h.dir, {});
+    };
+    const p = traced(["check", "--module", "P.bend"]);
+    expect(p.trace).toContain("resumePrefix miss");
+    expect({ code: p.code, stdout: p.stdout }).toEqual({ code: asImported("P.bend").code, stdout: asImported("P.bend").stdout });
+    const m = traced(["check", "--module", "M.bend"]);
+    expect(m.trace).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
+    expect({ code: m.code, stdout: m.stdout }).toEqual({ code: asImported("M.bend").code, stdout: asImported("M.bend").stdout });
+    expect(h.agree("E.bend")).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
+
+    // A module that does not check fails as the checker fails on it imported.
+    h.write("Bad.bend", "import Base\n\ndef oops() -> Nat:\n  \"text\"\n");
+    const bad = traced(["check", "--module", "Bad.bend"]);
+    const cold = asImported("Bad.bend");
+    expect(bad.code).toBe(1);
+    expect(bad.stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n")).toBe(cold.stderr);
+  }, 180_000);
 });
 

@@ -29,13 +29,13 @@ interface Sealed {
 }
 
 async function checkFixture(): Promise<Sealed[]> {
-  const order = await runtime.loadSteps(path.join(fixture, "A.bend"));
+  const order = await runtime.loadSteps(path.join(fixture, "A.bend"), "entry");
   const groups: CheckGroup[] = [...order.imports, order.entry].map((step, index) => ({
     steps: [step],
     key: String(index).padStart(64, "0"),
   }));
   const sealed: Sealed[] = [];
-  await runtime.check(order.entry.path, groups, undefined, (key, parent, child, last) => {
+  await runtime.check(order.entry.path, "", groups, undefined, (key, parent, child, last) => {
     const parentKey = sealed.length === 0 ? null : groups[sealed.length - 1]?.key ?? null;
     sealed.push({ parent, child, last, wire: encodePackWire(runtime, parentKey, parent, child, last) });
   });
