@@ -17,10 +17,8 @@
     };
 
     bend-src = {
-      # The fork's checker capability (SPEC-incremental-compilation.md), from the
-      # local checkout until its branch is pushed; then restore
-      # github:o1lo01ol1o/bend/expose-book-state-api and `nix flake update bend-src`.
-      url = "git+file:///Users/timpierson/Work/bend?ref=expose-book-state-api";
+      # The fork's checker capability (SPEC-incremental-compilation.md).
+      url = "github:o1lo01ol1o/bend/expose-book-state-api";
       flake = false;
     };
 

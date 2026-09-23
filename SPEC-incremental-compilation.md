@@ -147,4 +147,4 @@ Bend emits the live-key set per build (the MVP's next step 3); host GC deletes o
 
 ## Importing the fork commits
 
-This branch points `bend-src` at the local fork checkout, pinned to `80ffd6d1` through `flake.lock`. After the fork branch is pushed, switch the input back to `github:o1lo01ol1o/bend/expose-book-state-api` and run `nix flake update bend-src`.
+`bend-src` follows `github:o1lo01ol1o/bend/expose-book-state-api`, locked at `80ffd6d1` through `flake.lock`. A later fork commit comes in with `nix flake update bend-src`.

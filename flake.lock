@@ -52,16 +52,16 @@
       "locked": {
         "lastModified": 1790163302,
         "narHash": "sha256-FPoKiuskP85aG9a/MDGcWMetz2mVNvd0vJOpJKEu9D0=",
-        "ref": "expose-book-state-api",
+        "owner": "o1lo01ol1o",
+        "repo": "bend",
         "rev": "80ffd6d16371e952706cb43fa980039c48549af7",
-        "revCount": 3019,
-        "type": "git",
-        "url": "file:///Users/timpierson/Work/bend"
+        "type": "github"
       },
       "original": {
+        "owner": "o1lo01ol1o",
         "ref": "expose-book-state-api",
-        "type": "git",
-        "url": "file:///Users/timpierson/Work/bend"
+        "repo": "bend",
+        "type": "github"
       }
     },
     "cachix": {
