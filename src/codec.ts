@@ -372,7 +372,7 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
     ) {
       throw new PocError("CODEC", "pack constructor index disagrees with its ADTs");
     }
-    const order = stringArray(root.order, "pack.order");
+    const order = stringArray(root.order, "pack.order").map(intern);
     const hols = nonNegativeInteger(root.hols, "pack.hols");
     const open = nonNegativeInteger(root.open, "pack.open");
     const tmps: Array<readonly [string, Array<readonly [string, string]>]> = [];
@@ -381,7 +381,7 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
       const name = string(pair[0], `pack.tmps[${index}][0]`);
       const entries = array(pair[1], `pack.tmps[${index}][1]`).map((rawItem, itemIndex) => {
         const item = tuple(rawItem, 2, `pack.tmps[${index}][1][${itemIndex}]`);
-        return [string(item[0], "template key"), string(item[1], "template value")] as const;
+        return [string(item[0], "template key"), intern(string(item[1], "template value"))] as const;
       });
       tmps.push([name, entries]);
     }
@@ -530,7 +530,7 @@ function decodeTopLevel(
     const constructors = array(raw.c, `${location}.c`).map((item, index) => {
       const source = record(item, `${location}.c[${index}]`);
       return {
-        k: string(source.k, `${location}.c[${index}].k`),
+        k: intern(string(source.k, `${location}.c[${index}].k`)),
         n: nonNegativeInteger(source.n, `${location}.c[${index}].n`),
         T: higher(runtime, source.T, sources, `${location}.c[${index}].T`),
       } satisfies ConstructorLike;
@@ -572,8 +572,29 @@ function higher(
   return runtime.Bend.term_higher(restoreValue(value, sources, location) as PlainTerm);
 }
 
+// Names come back from JSON as fresh strings. The checker looks names up in
+// its tables (`book.tlds[k]`) on its hottest path, and JavaScriptCore turns a
+// key string into an atom on every such lookup unless it already is one: a
+// check over a restored state ran ~60% slower than cold until restored names
+// were atoms. An object's own key is an atom, so a name is interned by taking
+// it back out of one; each distinct name is atomized once per process.
+const interned = new Map<string, string>();
+
+function intern(text: string): string {
+  const known = interned.get(text);
+  if (known !== undefined) {
+    return known;
+  }
+  const atom = Object.keys({ [text]: 0 })[0] as string;
+  interned.set(atom, atom);
+  return atom;
+}
+
 function restoreValue(value: unknown, sources: readonly string[], location: string): unknown {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
+  if (typeof value === "string") {
+    return intern(value);
+  }
+  if (value === null || typeof value === "boolean") {
     return value;
   }
   if (typeof value === "number") {

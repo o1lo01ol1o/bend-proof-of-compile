@@ -143,6 +143,25 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   | `poc build`, after an edit (replay of what `main` reaches) | 1.4–1.5 s | 0.41–0.49 GB | |
   | `poc build`, no-op (artifact restored) | 1.3 s | 0.33 GB | |
 
+  An edit round on the same benchmark (build, then check, each step against
+  the CLI; all outputs identical; one core busy with another session):
+
+  | Edit | `poc build` | `bend -o` | `poc check` | `bend --check-only` |
+  |---|---|---|---|---|
+  | none (cold cache) | 8.6 s | 6.0 s | — | 5.9 s |
+  | entry (step 50) | 1.4 s | 6.0 s | 1.0 s | 6.0 s |
+  | late module (step 48) | 1.4 s | 6.2 s | 1.0 s | 6.2 s |
+  | heaviest module (step 33) | 7.2 s | 6.0 s | 1.3 s | ~6 s |
+  | early module (step 3) | 8.3–9.0 s (check) | | | 6.2–6.6 s |
+  | revert, no-op | 1.0–1.9 s | 6–7 s | 1.0–1.8 s | 6–7 s |
+
+  Savings are the checking of the files before the edit: 4–6× for edits late
+  in the load order; an edit before the expensive file costs a cold `poc`
+  check (~2 s over the checker: key folding, fill scan, sealing). Checks on a
+  restored parent ran ~60% slower until restored names were interned as
+  atomized strings (`src/codec.ts`, `intern`); they now match an in-memory
+  parent.
+
   Artifacts are byte-identical to `bend -o`. Of a cold check's overhead, key
   folding is ~0.7 s, sealing ~0.4 s (mostly the report summaries' walk of
   elaborations), the fill scan ~0.1 s.
