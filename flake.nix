@@ -18,9 +18,7 @@
 
     bend-src = {
       # The fork's checker capability (SPEC-incremental-compilation.md).
-      # Local until 16379eb7 (book_valid's replay) is pushed; then
-      # github:o1lo01ol1o/bend/expose-book-state-api again.
-      url = "git+file:///Users/timpierson/Work/bend?ref=expose-book-state-api";
+      url = "github:o1lo01ol1o/bend/expose-book-state-api";
       flake = false;
     };
 

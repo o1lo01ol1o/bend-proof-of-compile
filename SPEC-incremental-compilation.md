@@ -179,4 +179,4 @@ Where the implementation settles something this spec left open, or departs from 
 
 ## Importing the fork commits
 
-`bend-src` follows the fork's `expose-book-state-api` branch. It is locked at `16379eb7` (book_valid's replay) from the local checkout (`git+file:///Users/timpierson/Work/bend`) until that commit is pushed; then the input returns to `github:o1lo01ol1o/bend/expose-book-state-api`. A later fork commit comes in with `nix flake update bend-src`.
+`bend-src` follows `github:o1lo01ol1o/bend/expose-book-state-api`, locked at `16379eb7` (book_valid's replay) through `flake.lock`. A later fork commit comes in with `nix flake update bend-src`.

@@ -2,8 +2,8 @@
 
 Status: **`SPEC-incremental-compilation.md` milestones 1–7 are in**, including
 the decided next step of compilation after restore (5): re-elaborate what
-`main` reaches, through a replay filter in the fork (`16379eb7`, local until
-pushed; see the spec's last section), and trust option (b), signed states.
+`main` reaches, through a replay filter in the fork (`16379eb7`), and trust
+option (b), signed states.
 Open: the proof scope. Decided and recorded: keep pure-Bend hashing and accept
 its cost. `nix build .#proof-of-compile` runs the codec laws and golden vectors,
 the hash against Node's, incremental histories against the pinned checker's
@@ -263,15 +263,12 @@ boundary, the remaining groups and steps, and whether the check was seeded.
 
 ## Next steps (decisions first)
 
-1. **Push fork `16379eb7`** (book_valid's replay) to
-   `o1lo01ol1o/bend/expose-book-state-api`, point `bend-src` back at GitHub,
-   and `nix flake update bend-src`.
-2. **Trust beyond (b):** the signer runs as the user, so local code as that
+1. **Trust beyond (b):** the signer runs as the user, so local code as that
    user can sign; a separate-user signer daemon would close that.
-3. Hashing throughput is decided (keep the rule; ~0.6 s/MB of source per
+2. Hashing throughput is decided (keep the rule; ~0.6 s/MB of source per
    build); revisit only with a faster Bend SHA-256.
-4. **Report duplication:** export a summary-parameterised `cli_report` from
+3. **Report duplication:** export a summary-parameterised `cli_report` from
    the fork and drop the mirror in `src/compiler.ts`.
-5. **Categorical proofs via bend-categories** (the spec's proof-scope
+4. **Categorical proofs via bend-categories** (the spec's proof-scope
    decision). **Remove the dependency before publishing.**
-6. Publishing cleanup: `POC_DEBUG`, `dist/`, the `vendor/` symlink.
+5. Publishing cleanup: `POC_DEBUG`, `dist/`, the `vendor/` symlink.
