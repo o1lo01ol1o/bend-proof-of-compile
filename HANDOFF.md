@@ -12,7 +12,10 @@ compilation input (compiler identity, hash-library identity, source files,
 import edges, foreign files, checkpoints, targets) is folded into Merkle keys.
 Cache keys *are* proofs: a hit means the checked compiler state / artifact was
 produced from exactly those inputs. Artifacts and checked compiler states live
-in a content-addressed store (CAS) under `$TMPDIR/bend-proof-of-compile/v1`.
+in a content-addressed store (CAS). The CAS root is
+`$POC_CAS_ROOT/bend-proof-of-compile/v1` when `POC_CAS_ROOT` (absolute path)
+is set, else `$TMPDIR/bend-proof-of-compile/v1` — set it to keep incremental
+artifacts somewhere persistent rather than losing them to TMPDIR cleaning.
 
 ## The one architectural rule (user constraint)
 

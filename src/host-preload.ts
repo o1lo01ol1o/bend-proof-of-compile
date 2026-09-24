@@ -99,7 +99,15 @@ globalThis.POC_HOST = {
   cacheRoot(namespace, version) {
     const safeNamespace = safeSegment(namespace);
     const safeVersion = safeSegment(version);
-    const root = path.join(os.tmpdir(), safeNamespace, safeVersion);
+    // POC_CAS_ROOT places the content-addressed store. When set, it must be
+    // absolute: a relative path would make cache identity depend on the
+    // caller's cwd, silently splitting (or worse, sharing) the store. When
+    // unset, artifacts live under $TMPDIR and do not survive its cleaning.
+    const override = process.env.POC_CAS_ROOT;
+    if (override !== undefined && !path.isAbsolute(override)) {
+      throw new Error(`POC_CAS_ROOT must be an absolute path, got: ${override}`);
+    }
+    const root = path.join(override ?? os.tmpdir(), safeNamespace, safeVersion);
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     return root;
   },

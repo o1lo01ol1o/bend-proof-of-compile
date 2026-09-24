@@ -50,16 +50,16 @@
     "bend-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790072752,
-        "narHash": "sha256-5kQar+kDA1Q61aYjP2P7epNmaudxy8j2+SaWx8/GSE8=",
+        "lastModified": 1790185511,
+        "narHash": "sha256-sZsOkluLro2ZARcG+92AnFo3Qur5H/U0YzKR3tgAyxM=",
         "owner": "o1lo01ol1o",
         "repo": "bend",
-        "rev": "163230d1bd25f55194b707a42436437dbd44dd8d",
+        "rev": "fe19c6f1cb65d75a23a7c4939aa7a2dc43088419",
         "type": "github"
       },
       "original": {
         "owner": "o1lo01ol1o",
-        "ref": "expose-book-state-api",
+        "ref": "resumable-checked-books",
         "repo": "bend",
         "type": "github"
       }

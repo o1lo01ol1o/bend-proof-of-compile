@@ -17,7 +17,7 @@
     };
 
     bend-src = {
-      url = "github:o1lo01ol1o/bend/expose-book-state-api";
+      url = "github:o1lo01ol1o/bend/resumable-checked-books";
       flake = false;
     };
 
