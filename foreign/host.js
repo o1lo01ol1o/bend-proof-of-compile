@@ -10,11 +10,11 @@ function poc_host() {
 }
 
 function poc_done(value) {
-  return { $: "Done", value };
+  return { $: CID(Done), value };
 }
 
 function poc_fail(error) {
-  return { $: "Fail", error: String(error?.message ?? error) };
+  return { $: CID(Fail), error: String(error?.message ?? error) };
 }
 
 function poc_try(action) {
@@ -33,30 +33,30 @@ function poc_await(action) {
 
 function poc_list_to_array(list) {
   const values = [];
-  for (let cursor = list; cursor.$ === "Con"; cursor = cursor.tail) {
+  for (let cursor = list; cursor.$ === CID(Con); cursor = cursor.tail) {
     values.push(cursor.head);
   }
   return values;
 }
 
 function poc_list(values, convert) {
-  let result = { $: "Nil" };
+  let result = { $: CID(Nil) };
   for (let index = values.length - 1; index >= 0; index -= 1) {
-    result = { $: "Con", head: convert(values[index]), tail: result };
+    result = { $: CID(Con), head: convert(values[index]), tail: result };
   }
   return result;
 }
 
 function poc_maybe(value, convert) {
-  return value === null ? { $: "None" } : { $: "Some", value: convert(value) };
+  return value === null ? { $: CID(None) } : { $: CID(Some), value: convert(value) };
 }
 
 function poc_named_bytes(file) {
-  return { $: "NamedBytes", path: file.path, bytes: file.bytes };
+  return { $: CID(NamedBytes), path: file.path, bytes: file.bytes };
 }
 
 function poc_load_step(step) {
-  return { $: "LoadStep", path: step.path, namespace: step.namespace, text: step.text };
+  return { $: CID(LoadStep), path: step.path, namespace: step.namespace, text: step.text };
 }
 
 function poc_step_from_bend(step) {
@@ -72,7 +72,7 @@ function poc_groups_to_host(groups) {
 
 function poc_group(group) {
   return {
-    $: "CheckGroup",
+    $: CID(CheckGroup),
     steps: poc_list(group.steps, poc_load_step),
     key: group.key,
   };
@@ -80,16 +80,18 @@ function poc_group(group) {
 
 function poc_entry_rule(rule) {
   return rule.$ === "PlainEntry"
-    ? { $: "PlainEntry" }
-    : { $: "ProofEntry", laws: poc_maybe(rule.laws, (laws) => laws) };
+    ? { $: CID(PlainEntry) }
+    : { $: CID(ProofEntry), laws: poc_maybe(rule.laws, (laws) => laws) };
 }
 
 function poc_late_fill(fill) {
   return {
-    $: "LateFill",
+    $: CID(LateFill),
     declared: BigInt(fill.declared),
     filled: BigInt(fill.filled),
-    flags: poc_list(fill.flags, (flag) => ({ $: flag })),
+    flags: poc_list(fill.flags, (flag) => ({
+      $: flag === "FillForeign" ? CID(FillForeign) : CID(FillUnsafe),
+    })),
   };
 }
 
@@ -101,7 +103,7 @@ function host_compiler_inputs() {
   return poc_try(() => {
     const inputs = poc_host().compilerInputs();
     return {
-      $: "CompilerInputs",
+      $: CID(CompilerInputs),
       compiler: poc_list(inputs.compiler, poc_named_bytes),
       hashes: poc_list(inputs.hashes, poc_named_bytes),
     };
@@ -110,9 +112,9 @@ function host_compiler_inputs() {
 
 function host_load_steps(entry, role) {
   return poc_await(async () => {
-    const order = await poc_host().loadSteps(entry, role.$ === "AsModule" ? "module" : "entry");
+    const order = await poc_host().loadSteps(entry, role.$ === CID(AsModule) ? "module" : "entry");
     return {
-      $: "LoadOrder",
+      $: CID(LoadOrder),
       imports: poc_list(order.imports, poc_load_step),
       entry: poc_load_step(order.entry),
       rule: poc_entry_rule(order.rule),
@@ -133,7 +135,7 @@ function host_load_fills(root, namespace, steps) {
 
 function poc_verdict(verdict) {
   return {
-    $: "Verdict",
+    $: CID(Verdict),
     todos: BigInt(verdict.todos),
     reliant: poc_list(verdict.reliant, (name) => name),
   };
@@ -142,7 +144,7 @@ function poc_verdict(verdict) {
 function host_state_get(cache, key) {
   return poc_try(() => poc_maybe(
     poc_host().stateGet(cache, key),
-    (found) => io_tup({ $: "Checkpoint", token: found.state }, poc_verdict(found.verdict)),
+    (found) => io_tup({ $: CID(Checkpoint), token: found.state }, poc_verdict(found.verdict)),
   ));
 }
 
@@ -155,7 +157,7 @@ function host_state_get_longest(cache, candidates) {
     return poc_maybe(
       poc_host().stateGetLongest(cache, plan),
       (found) => io_tup(
-        { $: "Checkpoint", token: found.state },
+        { $: CID(Checkpoint), token: found.state },
         poc_list(found.groups, poc_group),
       ),
     );
@@ -170,19 +172,19 @@ function host_state_foreigns(cache, key) {
 }
 
 function host_stage_start() {
-  return poc_try(() => ({ $: "Stage", token: poc_host().stageStart() }));
+  return poc_try(() => ({ $: CID(Stage), token: poc_host().stageStart() }));
 }
 
 function host_stage_commit(stage) {
   return poc_try(() => {
     poc_host().stageCommit(stage.token);
-    return { $: "Unit" };
+    return { $: CID(Unit) };
   });
 }
 
 function host_stage_abort(stage) {
   poc_host().stageAbort(stage.token);
-  return { $: "Unit" };
+  return { $: CID(Unit) };
 }
 
 function host_book_check(cache, root, namespace, groups, seed, stage) {
@@ -192,12 +194,12 @@ function host_book_check(cache, root, namespace, groups, seed, stage) {
       root,
       namespace,
       poc_groups_to_host(groups),
-      seed.$ === "Some" ? seed.value.token : undefined,
+      seed.$ === CID(Some) ? seed.value.token : undefined,
       stage.token,
     );
     return io_tup(
-      { $: "Checkpoint", token: checked.state },
-      { $: "Stage", token: checked.stage },
+      { $: CID(Checkpoint), token: checked.state },
+      { $: CID(Stage), token: checked.stage },
       poc_verdict(checked.verdict),
     );
   });
@@ -206,7 +208,10 @@ function host_book_check(cache, root, namespace, groups, seed, stage) {
 function host_output_path(output) {
   return poc_try(() => {
     const observed = poc_host().outputPath(output);
-    return { $: observed.directory ? "OutputDirectory" : "OutputFile", real: observed.real };
+    return {
+      $: observed.directory ? CID(OutputDirectory) : CID(OutputFile),
+      real: observed.real,
+    };
   });
 }
 
@@ -219,20 +224,20 @@ function host_artifact_restore(cache, key, output) {
 
 function host_output_remove(output) {
   poc_host().outputRemove(output);
-  return { $: "Unit" };
+  return { $: CID(Unit) };
 }
 
 function host_artifact_build(cache, key, output, target, state, reliant) {
   return poc_try(() => {
     poc_host().artifactBuild(cache, key, output, target, state.token, poc_list_to_array(reliant));
-    return { $: "Unit" };
+    return { $: CID(Unit) };
   });
 }
 
 function host_roots_put(cache, root, live) {
   return poc_try(() => {
     poc_host().rootsPut(cache, root, poc_list_to_array(live));
-    return { $: "Unit" };
+    return { $: CID(Unit) };
   });
 }
 
@@ -251,3 +256,27 @@ function host_cache_verify(cache) {
 function host_cache_gc(cache, live) {
   return poc_try(() => JSON.stringify(poc_host().cacheGc(cache, poc_list_to_array(live))));
 }
+
+// Bend 2.0.27 effect sources register each implementation explicitly. The
+// compiler substitutes each constructor marker below with the id assigned to
+// that foreign definition in this program.
+io_eff(CID(Host.Host.cache_root), host_cache_root);
+io_eff(CID(Host.Host.compiler_inputs), host_compiler_inputs);
+io_eff(CID(Host.Host.load_steps), host_load_steps);
+io_eff(CID(Host.Host.load_fills), host_load_fills);
+io_eff(CID(Host.Host.state_get), host_state_get);
+io_eff(CID(Host.Host.state_get_longest), host_state_get_longest);
+io_eff(CID(Host.Host.state_foreigns), host_state_foreigns);
+io_eff(CID(Host.Host.stage_start), host_stage_start);
+io_eff(CID(Host.Host.stage_commit), host_stage_commit);
+io_eff(CID(Host.Host.stage_abort), host_stage_abort);
+io_eff(CID(Host.Host.book_check), host_book_check);
+io_eff(CID(Host.Host.output_path), host_output_path);
+io_eff(CID(Host.Host.artifact_restore), host_artifact_restore);
+io_eff(CID(Host.Host.output_remove), host_output_remove);
+io_eff(CID(Host.Host.artifact_build), host_artifact_build);
+io_eff(CID(Host.Host.roots_put), host_roots_put);
+io_eff(CID(Host.Host.roots_live), host_roots_live);
+io_eff(CID(Host.Host.cache_status), host_cache_status);
+io_eff(CID(Host.Host.cache_verify), host_cache_verify);
+io_eff(CID(Host.Host.cache_gc), host_cache_gc);

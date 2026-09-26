@@ -93,8 +93,6 @@ interface MainModule {
 }
 
 interface CompModule {
-  readonly SYNTH: string[];
-  book_owned(book: BookLike, names?: string[]): void;
   compile_book(book: BookLike): string;
   js_book(book: BookLike): string;
   js_lib(book: BookLike, roots: string[], outputs: string[] | null): string;
@@ -179,9 +177,10 @@ export interface CompilerRuntime {
     seal: (key: string, parent: BookStateLike, child: BookStateLike, last: number) => void,
   ): Promise<{ readonly state: BookStateLike; readonly last: number }>;
   // The final judgment of an entry's state, as `book_read` and the checker's
-  // report make it: names the compiler owns (a rejection), the count of
-  // holes and open laws, and the entry's own claims that rely on @unsafe or
-  // foreign code. `n0` is where the entry's claims begin in the order.
+  // report make it: the count of holes and open laws, and the claims that
+  // rely on @unsafe or foreign code. Claims are the entry's own definitions
+  // plus every non-Base law filled anywhere in its import graph. `n0` is
+  // where the entry's definitions begin in the order.
   verdict(state: BookStateLike, n0: number): Verdict;
   // The artifact of a state whose restored records carry no elaborations:
   // what `main` reaches is re-elaborated by a replay of the order (5).
@@ -223,8 +222,6 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     typeof Main.book_read !== "function" ||
     typeof Main.book_over !== "function" ||
     typeof Main.book_flat !== "function" ||
-    !Array.isArray(Comp.SYNTH) ||
-    typeof Comp.book_owned !== "function" ||
     typeof Comp.compile_book !== "function" ||
     typeof Comp.js_book !== "function" ||
     typeof Comp.js_lib !== "function" ||
@@ -252,11 +249,17 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
   };
 
   // The checker's report (main.ts cli_report), over summaries, so restored
-  // records need neither elaborations nor raising: the entry's own claims
-  // that are @unsafe or foreign, or whose types or elaboration name, through
-  // any chain of references, a record that is.
+  // records need neither elaborations nor raising: the entry's definitions
+  // and every non-Base law filled anywhere in its import graph that are
+  // @unsafe or foreign, or whose types or elaboration name, through any chain
+  // of references, a record that is. A filled law occurs twice in the order:
+  // once at its declaration and once at its definition.
   const reliant = (book: BookLike, n0: number): string[] => {
-    const own = [...new Set(book.order.slice(n0))];
+    const met = new Set<string>();
+    const laws = book.order.filter((name) =>
+      met.has(name) ? book.tlds[name]?.b !== true : !met.add(name)
+    );
+    const own = [...new Set([...book.order.slice(n0), ...laws])];
     const bad = new Set(namesOf(book.tlds).filter(
       (name) => summaryOf(runtime, book.tlds, name)?.promise === true,
     ));
@@ -463,11 +466,6 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
       return { state: parent, last };
     },
     verdict(state, n0) {
-      try {
-        Comp.book_owned(state.book, Comp.SYNTH);
-      } catch (cause) {
-        throw rejected(cause, {});
-      }
       return {
         todos: state.book.hols + state.book.open,
         reliant: reliant(state.book, n0),

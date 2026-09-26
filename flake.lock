@@ -2,6 +2,7 @@
   "nodes": {
     "bend-categories": {
       "inputs": {
+        "bend-poc": "bend-poc",
         "bend-src": [
           "bend-src"
         ],
@@ -16,16 +17,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1790076135,
-        "narHash": "sha256-2v8EuKriyHWtdzeLiALbIR6Q3fRbA7aefrR8jmIVpOw=",
-        "ref": "main",
-        "rev": "6ed213a034f770488c25f0043308ec5fe02dd23f",
-        "revCount": 135,
+        "lastModified": 1790435696,
+        "narHash": "sha256-+416wdFqFLtQd34jqnLs0qpzD9TdoYcdzsw+r6wl8P4=",
+        "ref": "upstream-5108-v2",
+        "rev": "6389d369da6a592fa783001dd4f8bf5b1976ccc1",
+        "revCount": 233,
         "type": "git",
         "url": "https://gitlab.outstandinglabs.ai/o1lo01ol1o/bend-categories.git"
       },
       "original": {
-        "ref": "main",
+        "ref": "upstream-5108-v2",
         "type": "git",
         "url": "https://gitlab.outstandinglabs.ai/o1lo01ol1o/bend-categories.git"
       }
@@ -47,20 +48,76 @@
         "type": "github"
       }
     },
-    "bend-src": {
+    "bend-hashes-src_2": {
       "flake": false,
       "locked": {
-        "lastModified": 1790171662,
-        "narHash": "sha256-/denwHETYpZJf2qAh+33+j5bMFuwgbTWL8wQGl0WVaM=",
+        "lastModified": 1789845438,
+        "narHash": "sha256-CkDkoJ7o0AGQ263VQlr7m9uhAzXRoivaE1l2vryRx+g=",
+        "owner": "victormeloasm",
+        "repo": "bend-hashes",
+        "rev": "e425f831f35d08afa81a159b295576ce9d6c1342",
+        "type": "github"
+      },
+      "original": {
+        "owner": "victormeloasm",
+        "ref": "main",
+        "repo": "bend-hashes",
+        "type": "github"
+      }
+    },
+    "bend-poc": {
+      "inputs": {
+        "bend-categories": [
+          "bend-categories",
+          "bend-src"
+        ],
+        "bend-hashes-src": "bend-hashes-src",
+        "bend-src": [
+          "bend-categories",
+          "bend-src"
+        ],
+        "devenv": [
+          "bend-categories",
+          "devenv"
+        ],
+        "nixpkgs": [
+          "bend-categories",
+          "nixpkgs"
+        ],
+        "systems": [
+          "bend-categories",
+          "systems"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790200608,
+        "narHash": "sha256-jJhTukMVtdr2l/rfBmDjxA98Mr8SqHXABlsHW818jxg=",
         "owner": "o1lo01ol1o",
-        "repo": "bend",
-        "rev": "16379eb70f1e1c0c28481e6b8d24fe68c24bd45b",
+        "repo": "bend-proof-of-compile",
+        "rev": "6fc87197a0947c6da5aaa688912c37e3afcd5e71",
         "type": "github"
       },
       "original": {
         "owner": "o1lo01ol1o",
-        "ref": "expose-book-state-api",
+        "ref": "correct-incremental-compilation",
+        "repo": "bend-proof-of-compile",
+        "type": "github"
+      }
+    },
+    "bend-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790338522,
+        "narHash": "sha256-t+j0x6CK4p2kjcKRRkWwmG5lGer2m2ePxfuSL0ddZZo=",
+        "owner": "o1lo01ol1o",
         "repo": "bend",
+        "rev": "f9b57338da16be2e2c201c3d30394e8d923f2c5b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "o1lo01ol1o",
+        "repo": "bend",
+        "rev": "f9b57338da16be2e2c201c3d30394e8d923f2c5b",
         "type": "github"
       }
     },
@@ -327,7 +384,7 @@
     "root": {
       "inputs": {
         "bend-categories": "bend-categories",
-        "bend-hashes-src": "bend-hashes-src",
+        "bend-hashes-src": "bend-hashes-src_2",
         "bend-src": "bend-src",
         "devenv": "devenv",
         "nixpkgs": "nixpkgs",

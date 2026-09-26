@@ -1,7 +1,7 @@
-import ./P.bend as P
+import ./P.bend as Q
 
-def P.later():
-  P.flip(P.O{})
+def Q.later():
+  Q.flip(Q.O{})
 
-def main() -> P.Bit:
-  P.later()
+def main() -> Q.Bit:
+  Q.later()

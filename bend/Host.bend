@@ -52,8 +52,8 @@ type LateFill is Data:
   LateFill{declared: Nat, filled: Nat, flags: List<&2, FillFlag>}
 
 # The checker's judgment of an entry's final state: its count of holes and
-# open laws, and the entry's own claims that rely on @unsafe or foreign code
-# (the checker's report).
+# open laws, and the claims that rely on @unsafe or foreign code (the entry's
+# own definitions plus every non-Base law filled in its import graph).
 type Verdict is Data:
   Verdict{todos: Nat, reliant: List<&2, String>}
 

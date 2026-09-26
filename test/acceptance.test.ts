@@ -110,20 +110,20 @@ def base_value() -> Nat:
 `;
 
 const M = (body: string): string => `import Base
-import ./P.bend as P
+import ./P.bend as Q
 
-def P.L():
+def Q.L():
   ${body}
 
 def middle() -> Nat:
-  Nat.add(P.L(), P.base_value())
+  Nat.add(Q.L(), Q.base_value())
 `;
 
 const E = (message: string): string => `import Base
-import ./M.bend as M
+import ./M.bend as R
 
 def main() -> IO(Unit):
-  IO.print("${message} " ++ Nat.show(M.middle()))
+  IO.print("${message} " ++ Nat.show(R.middle()))
 `;
 
 describe("incremental histories agree with cold checks", () => {
@@ -156,10 +156,10 @@ describe("incremental histories agree with cold checks", () => {
     const h = new History();
     h.write("P.bend", P);
     h.write("Open.bend", `import Base
-import ./P.bend as P
+import ./P.bend as Q
 
 def main() -> IO(Unit):
-  IO.print(Nat.show(P.base_value()))
+  IO.print(Nat.show(Q.base_value()))
 `);
     h.agree("Open.bend");
     h.write("Hole.bend", `import Base
@@ -169,15 +169,38 @@ def gap() -> Nat:
 `);
     h.write("UsesHole.bend", `import Base
 import ./Hole.bend as H
-import ./P.bend as P
+import ./P.bend as Q
 
-def P.L():
+def Q.L():
   1n
 
 def main() -> IO(Unit):
   IO.print("hole below")
 `);
     h.agree("UsesHole.bend");
+
+    // Since Bend 2.0.27, every filled non-Base law is a claim of the
+    // entry, including a fill in an imported file that the entry never names.
+    h.write("UnsafeLaws.bend", `import Base
+
+law danger:
+  Nat
+`);
+    h.write("UnsafeFill.bend", `import Base
+import ./UnsafeLaws.bend as Laws
+
+@unsafe
+def Laws.danger():
+  0n
+`);
+    h.write("UnsafeEntry.bend", `import Base
+import ./UnsafeFill.bend as Fill
+
+def main() -> IO(Unit):
+  IO.print("unsafe imported law")
+`);
+    h.agree("UnsafeEntry.bend");
+
     h.write("M.bend", M("5n"));
     h.write("E.bend", E("filled"));
     h.agree("E.bend");
@@ -219,10 +242,10 @@ def main() -> IO(Unit):
     expect(h.agree("E.bend")).toContain("resumePrefix rank=0");
     // A second entry over the same prefix restores the shared states.
     h.write("F.bend", `import Base
-import ./M.bend as M
+import ./M.bend as R
 
 def main() -> IO(Unit):
-  IO.print(Nat.show(M.middle()))
+  IO.print(Nat.show(R.middle()))
 `);
     expect(h.agree("F.bend")).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
     expect(h.poc(["cache", "verify"]).stdout).toContain('"quarantined":0');
@@ -282,20 +305,20 @@ def main() -> IO(Unit):
     const h = new History();
     h.write("P.bend", P);
     h.write("M.bend", `import Base
-import ./P.bend as P
+import ./P.bend as Q
 
-def P.L():
+def Q.L():
   5n
 
 def middle() -> Nat:
-  Nat.add(P.L(), P.base_value())
+  Nat.add(Q.L(), Q.base_value())
 `);
     h.write("E.bend", `import Base
-import ./P.bend as P
-import ./M.bend as M
+import ./P.bend as Q
+import ./M.bend as R
 
 def main() -> IO(Unit):
-  IO.print(Nat.show(M.middle()))
+  IO.print(Nat.show(R.middle()))
 `);
     const traced = (args: string[]): Run & { trace: string } => {
       const result = h.poc(args, true);

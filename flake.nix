@@ -9,7 +9,7 @@
     devenv.inputs.nixpkgs.follows = "nixpkgs";
 
     bend-categories = {
-      url = "git+https://gitlab.outstandinglabs.ai/o1lo01ol1o/bend-categories.git?ref=main";
+      url = "git+https://gitlab.outstandinglabs.ai/o1lo01ol1o/bend-categories.git?ref=upstream-5108-v2";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.systems.follows = "systems";
       inputs.devenv.follows = "devenv";
@@ -17,8 +17,9 @@
     };
 
     bend-src = {
-      # The fork's checker capability (SPEC-incremental-compilation.md).
-      url = "github:o1lo01ol1o/bend/expose-book-state-api";
+      # Bend 2.0.27 plus the checker capability used by the incremental
+      # compiler. Pin the rebased fork by revision, matching bend-categories.
+      url = "github:o1lo01ol1o/bend/f9b57338da16be2e2c201c3d30394e8d923f2c5b";
       flake = false;
     };
 
@@ -45,7 +46,7 @@
       ...
     }:
     let
-      bendVersion = "2.0.25";
+      bendVersion = "2.0.27";
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
       checkScript = ''
         set -euo pipefail
@@ -255,8 +256,8 @@
               EOF
               cat > "$TMPDIR/laws/A.bend" <<'EOF'
               import Base
-              import ./P.bend as P
-              def P.L():
+              import ./P.bend as Q
+              def Q.L():
                 7n
               def main() -> IO(Unit):
                 IO.print("law filled later")

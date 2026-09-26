@@ -2,7 +2,7 @@
 
 Status: **`SPEC-incremental-compilation.md` milestones 1–7 are in**, including
 the decided next step of compilation after restore (5): re-elaborate what
-`main` reaches, through a replay filter in the fork (`16379eb7`), and trust
+`main` reaches, through a replay filter in the fork (`f9b57338`), and trust
 option (b), signed states.
 Open: the proof scope. Decided and recorded: keep pure-Bend hashing and accept
 its cost. `nix build .#proof-of-compile` runs the codec laws and golden vectors,
@@ -68,10 +68,10 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
 
 ### Foreign boundary
 
-- `foreign/host.js` — the only JS inside the compiled program: converts to and
-  from Bend constructors and calls `globalThis.POC_HOST`. The checker's loader
-  is async: `poc_await` returns a promise of the Result, which `src/cli.ts`'s IO
-  loop awaits.
+- `foreign/host.js` — the only JS inside the compiled program: registers the
+  Bend 2.0.27 effects, converts to and from compiler-assigned constructor IDs,
+  and calls `globalThis.POC_HOST`. The checker's loader is async: `poc_await`
+  returns a promise of the Result, which `src/cli.ts`'s IO loop awaits.
 - `foreign/host.c` — a deliberate stub.
 
 ### TypeScript host
@@ -88,8 +88,9 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   (traversal-only walk; on a walk error, the cold load's error), `loadFills`
   (parse-only load; laws filled late, with their foreign/`@unsafe` flags),
   `check` (each group in a `book_over` child, later files skipped by `on` and
-  forgotten, then `book_valid`), `verdict` (`book_owned`, TODO count, and the
-  report, mirroring `cli_report` over summaries), `emit`, `emitRestored` (the
+  forgotten, then `book_valid`), `verdict` (TODO count and the report,
+  mirroring `cli_report` over summaries, including every filled non-Base law),
+  `emit`, `emitRestored` (the
   replay: `book_valid(book, 0, only)` over what `main` reaches, closed under
   instance callers), and the checker's error rendering (`book_err`).
 - `src/codec.ts` — packs (schema 3): a sealed boundary's own records without
@@ -238,7 +239,7 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   '/bend2/main.ts --check-only src/Categories/'` clears them; the parent
   scripts respawn, so expect recurrence.
 - Prefer fixed store paths in one-off commands to skip flake re-eval:
-  bend `/nix/store/412w6jg0xmxppna1w41a38bm9zcpki4v-bend-2.0.25-unstable` (fork `80ffd6d1`),
+  bend `/nix/store/rryz0gll0z32qrc1j5ba725k48sl672v-bend-2.0.27-unstable` (fork `f9b57338`),
   bun `/nix/store/9nmsidbfpjv43b5pzw0sbhpaz6mgc9v8-bun-1.4.2` (re-derive with
   `nix build` if inputs change).
 - `warning: SQLite database '/nix/var/nix/db/db.sqlite' is busy` is harmless
