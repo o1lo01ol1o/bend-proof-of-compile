@@ -180,4 +180,4 @@ Where the implementation settles something this spec left open, or departs from 
 
 ## Importing the fork commits
 
-`bend-src` is pinned to `github:o1lo01ol1o/bend/f9b57338da16be2e2c201c3d30394e8d923f2c5b` (Bend 2.0.27 plus the checked-book API and replay) through `flake.lock`. The fork's branches are rebased, so a later compiler revision is selected explicitly in `flake.nix` before updating the lock.
+`bend-src` is pinned to `github:o1lo01ol1o/bend/1ee1ac9056175e594e5c500770877d818814debc` on `perf/bounded-alpha-congruence` (Bend 2.0.27 plus the checked-book API, replay, and bounded positive alpha-congruence) through `flake.lock`. The fork's branches are rebased, so a later compiler revision is selected explicitly in `flake.nix` before updating the lock.

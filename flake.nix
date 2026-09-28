@@ -17,9 +17,9 @@
     };
 
     bend-src = {
-      # Bend 2.0.27 plus the checker capability used by the incremental
-      # compiler. Pin the rebased fork by revision, matching bend-categories.
-      url = "github:o1lo01ol1o/bend/f9b57338da16be2e2c201c3d30394e8d923f2c5b";
+      # Bend 2.0.27 plus checked-book replay and bounded alpha-congruence.
+      # Pin perf/bounded-alpha-congruence by revision, matching bend-categories.
+      url = "github:o1lo01ol1o/bend/1ee1ac9056175e594e5c500770877d818814debc";
       flake = false;
     };
 

@@ -107,17 +107,17 @@
     "bend-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790338522,
-        "narHash": "sha256-t+j0x6CK4p2kjcKRRkWwmG5lGer2m2ePxfuSL0ddZZo=",
+        "lastModified": 1790545469,
+        "narHash": "sha256-BSRs+fC+TgzwbFb+CbKUPqdINZbwCxx8dQxWrJuHvVw=",
         "owner": "o1lo01ol1o",
         "repo": "bend",
-        "rev": "f9b57338da16be2e2c201c3d30394e8d923f2c5b",
+        "rev": "1ee1ac9056175e594e5c500770877d818814debc",
         "type": "github"
       },
       "original": {
         "owner": "o1lo01ol1o",
         "repo": "bend",
-        "rev": "f9b57338da16be2e2c201c3d30394e8d923f2c5b",
+        "rev": "1ee1ac9056175e594e5c500770877d818814debc",
         "type": "github"
       }
     },
