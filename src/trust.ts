@@ -57,8 +57,10 @@ export type Statement =
       readonly reliant: readonly string[];
     };
 
+export const CAS_SCHEMA = 4;
+
 export function statementText(statement: Statement): string {
-  const common = ["bend-proof-of-compile/cas/v3", statement.kind, statement.key, statement.payloadSha256, statement.bytes];
+  const common = [`bend-proof-of-compile/cas/v${CAS_SCHEMA}`,  statement.kind, statement.key, statement.payloadSha256, statement.bytes];
   return JSON.stringify(statement.kind === "state"
     ? [...common, statement.parent, statement.foreigns]
     : [...common, statement.reliant]);

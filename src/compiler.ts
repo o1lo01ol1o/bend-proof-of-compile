@@ -7,8 +7,14 @@ import { PocError } from "./error.ts";
 
 export type Namespace = string | null;
 
+export interface SourceFileLike {
+  readonly str: string;
+  readonly ns: string;
+  readonly al: Readonly<Record<string, string>>;
+}
+
 export interface SpanLike {
-  readonly src: string;
+  readonly file: SourceFileLike;
   readonly beg: number;
   readonly end: number;
 }
@@ -40,6 +46,7 @@ export interface DefinitionLike {
   e?: PlainTerm;
   b?: boolean;
   u?: boolean;
+  l?: boolean;
   i?: string[];
 }
 
@@ -50,8 +57,7 @@ export interface BookLike {
   ctrs: Record<string, ConstructorLike>;
   order: string[];
   hols: number;
-  open: number;
-  tmps: Record<string, Record<string, string>>;
+  tmps: Record<string, Map<string, string>>;
 }
 
 export interface BookStateLike {
@@ -74,15 +80,31 @@ interface BendModule {
     namespace: string,
     seen: Map<string, Namespace>,
     span?: unknown,
+    root?: string,
     on?: LoadHook,
   ): Promise<number>;
   book_valid(book: BookLike, done: number, only?: Set<string>): void;
   term_lower(term: HigherTerm): PlainTerm;
   term_higher(term: PlainTerm): HigherTerm;
   err_show?(error: unknown): string;
+  name_key(key: string): string;
 }
 
+export interface BookRecord {
+  readonly base: boolean;
+  readonly law: boolean;
+  readonly promise: "unsafe" | "foreign" | null;
+  readonly refs: readonly string[];
+}
+
+export type BookReport =
+  | { readonly $: "Pass"; readonly message: string }
+  | { readonly $: "Fail"; readonly message: string; readonly reliant: readonly string[] };
+
 interface MainModule {
+  book_report(book: BookLike, read?: (key: string) => BookRecord | undefined,
+    policy?: "proof" | "allow-unsafe"): BookReport;
+  book_err(error: unknown, checking?: boolean): string;
   book_read(
     file: string,
     unsafeSeed?: BookStateLike,
@@ -95,8 +117,8 @@ interface MainModule {
 interface CompModule {
   compile_book(book: BookLike): string;
   js_book(book: BookLike): string;
-  js_lib(book: BookLike, roots: string[], outputs: string[] | null): string;
-  io_base(book: BookLike, term: HigherTerm): unknown;
+  js_lib(book: BookLike, mod?: boolean): string;
+  io_type(book: BookLike): HigherTerm | null;
 }
 
 // One file of the checker's load order: its realpath, its namespace, and the
@@ -143,6 +165,8 @@ export function moduleNamespace(file: string): string {
 
 export interface Verdict {
   readonly todos: number;
+  readonly report: BookReport;
+  readonly unsafeReport: BookReport;
   readonly reliant: readonly string[];
 }
 
@@ -177,10 +201,9 @@ export interface CompilerRuntime {
     seal: (key: string, parent: BookStateLike, child: BookStateLike, last: number) => void,
   ): Promise<{ readonly state: BookStateLike; readonly last: number }>;
   // The final judgment of an entry's state, as `book_read` and the checker's
-  // report make it: the count of holes and open laws, and the claims that
-  // rely on @unsafe or foreign code. Claims are the entry's own definitions
-  // plus every non-Base law filled anywhere in its import graph. `n0` is
-  // where the entry's definitions begin in the order.
+  // report make it: the count of holes/open laws, and all non-Base
+  // definitions that rely on @unsafe or foreign code. `n0` is retained as
+  // the entry boundary, but upstream's verdict covers the entire book.
   verdict(state: BookStateLike, n0: number): Verdict;
   // The artifact of a state whose restored records carry no elaborations:
   // what `main` reaches is re-elaborated by a replay of the order (5).
@@ -222,10 +245,13 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     typeof Main.book_read !== "function" ||
     typeof Main.book_over !== "function" ||
     typeof Main.book_flat !== "function" ||
+    typeof Main.book_report !== "function" ||
+    typeof Main.book_err !== "function" ||
     typeof Comp.compile_book !== "function" ||
     typeof Comp.js_book !== "function" ||
     typeof Comp.js_lib !== "function" ||
-    typeof Comp.io_base !== "function" ||
+    typeof Comp.io_type !== "function" ||
+    typeof Bend.name_key !== "function" ||
     typeof Bend.BASE_BEND !== "string"
   ) {
     throw new PocError(
@@ -235,10 +261,10 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     );
   }
 
-  const rejected = (cause: unknown, details: Readonly<Record<string, unknown>>): PocError =>
+  const rejected = (cause: unknown, details: Readonly<Record<string, unknown>>, checking = false): PocError =>
     cause instanceof PocError
       ? cause
-      : new PocError("COMPILER_REJECTED", formatBendError(Bend, cause), details, { cause });
+      : new PocError("COMPILER_REJECTED", Main.book_err(cause, checking), details, { cause });
 
   const emit = (book: BookLike, target: Target): string => {
     try {
@@ -248,41 +274,10 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     }
   };
 
-  // The checker's report (main.ts cli_report), over summaries, so restored
-  // records need neither elaborations nor raising: the entry's definitions
-  // and every non-Base law filled anywhere in its import graph that are
-  // @unsafe or foreign, or whose types or elaboration name, through any chain
-  // of references, a record that is. A filled law occurs twice in the order:
-  // once at its declaration and once at its definition.
-  const reliant = (book: BookLike, n0: number): string[] => {
-    const met = new Set<string>();
-    const laws = book.order.filter((name) =>
-      met.has(name) ? book.tlds[name]?.b !== true : !met.add(name)
-    );
-    const own = [...new Set([...book.order.slice(n0), ...laws])];
-    const bad = new Set(namesOf(book.tlds).filter(
-      (name) => summaryOf(runtime, book.tlds, name)?.promise === true,
-    ));
-    const uses = new Map<string, string[]>();
-    const seen = new Set<string>();
-    for (const queue = bad.size === 0 ? [] : own.slice(); queue.length > 0;) {
-      const name = queue.pop() as string;
-      const summary = summaryOf(runtime, book.tlds, name);
-      if (summary !== undefined && !seen.has(name)) {
-        seen.add(name);
-        for (const reference of summary.refs) {
-          const users = uses.get(reference) ?? [];
-          users.push(name);
-          uses.set(reference, users);
-          queue.push(reference);
-        }
-      }
-    }
-    for (const name of bad) {
-      uses.get(name)?.forEach((user) => bad.add(user));
-    }
-    return own.filter((name) => bad.has(name));
-  };
+  // Bend owns verdict policy and rendering; the codec supplies only the
+  // stored observations so reporting never raises restored terms.
+  const report = (book: BookLike, policy: "proof" | "allow-unsafe" = "proof"): BookReport =>
+    Main.book_report(book, (name) => summaryOf(runtime, book.tlds, name), policy);
 
   // Re-elaboration for compilation after restore (spec 5, the chosen next
   // step). The emitters compile what `main` reaches through elaborations, so
@@ -293,7 +288,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
   // event and reveals it in order, as a cold check does; instances are all
   // present from the start (their names are fixed by the instance tables).
   const replay = (book: BookLike): BookLike => {
-    const instances = new Set(Object.values(book.tmps).flatMap((table) => Object.values(table)));
+    const instances = new Set(Object.values(book.tmps).flatMap((table) => [...table.values()]));
     const refs = (name: string): readonly string[] => summaryOf(runtime, book.tlds, name)?.refs ?? [];
     const callers = new Map<string, string[]>();
     for (const name of namesOf(book.tlds)) {
@@ -332,14 +327,13 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     }
     const tmps = Object.create(null) as BookLike["tmps"];
     for (const [name, table] of Object.entries(book.tmps)) {
-      tmps[name] = Object.assign(Object.create(null) as Record<string, string>, table);
+      tmps[name] = new Map(table);
     }
     const again: BookLike = {
       tlds: events,
       ctrs: Object.create(null) as BookLike["ctrs"],
       order: [...book.order],
       hols: 0,
-      open: 0,
       tmps,
     };
     Bend.book_valid(again, 0, only);
@@ -363,7 +357,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
       const steps: LoadStep[] = [];
       const namespace = role === "entry" ? "" : moduleNamespace(entry);
       try {
-        await Bend.book_load(Bend.book_nil(), entry, namespace, new Map(), undefined, (real, namespace, text) => {
+        await Bend.book_load(Bend.book_nil(), entry, namespace, new Map(), undefined, undefined, (real, namespace, text) => {
           steps.push({ path: real, namespace, text });
           return true;
         });
@@ -391,13 +385,13 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
       const book = Bend.book_nil();
       const starts: number[] = [];
       try {
-        await Bend.book_load(book, root, namespace, new Map(), undefined, (real, namespace, text) => {
+        await Bend.book_load(book, root, namespace, new Map(), undefined, undefined, (real, namespace, text) => {
           expectStep(steps[starts.length], real, namespace, text);
           starts.push(book.order.length);
           return false;
         });
       } catch (cause) {
-        throw rejected(cause, { root });
+        throw rejected(cause, { root }, true);
       }
       if (starts.length !== steps.length) {
         throw unstable();
@@ -436,7 +430,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
           const done = book.order.length;
           const skipped: string[] = [];
           let count = 0;
-          await Bend.book_load(book, root, namespace, seen, undefined, (real, loaded, text) => {
+          await Bend.book_load(book, root, namespace, seen, undefined, undefined, (real, loaded, text) => {
             // Files before the group are already seen. The loader reaches the
             // group's files next, in order; later files are left unparsed
             // and forgotten, so the next group loads them.
@@ -461,14 +455,17 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
           parent = child;
         }
       } catch (cause) {
-        throw rejected(cause, { root });
+        throw rejected(cause, { root }, true);
       }
       return { state: parent, last };
     },
-    verdict(state, n0) {
+    verdict(state, _n0) {
+      const result = report(state.book);
       return {
-        todos: state.book.hols + state.book.open,
-        reliant: reliant(state.book, n0),
+        todos: state.book.hols,
+        report: result,
+        unsafeReport: report(state.book, "allow-unsafe"),
+        reliant: result.$ === "Fail" ? result.reliant : [],
       };
     },
     emitRestored(state, target) {
@@ -490,7 +487,9 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
             topLevel.b !== true &&
             topLevel.x === 0 &&
             topLevel.i === undefined &&
-            Comp.io_base(book, topLevel.T) === null;
+            Comp.io_type({ ...book, tlds: Object.assign(Object.create(book.tlds), {
+              main: topLevel,
+            }) }) === null;
         });
         const outputs = roots === undefined ? available : [...roots];
         for (const name of outputs) {
@@ -498,13 +497,15 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
             throw new Error(`Bend library root is not exportable: ${name}`);
           }
         }
-        return Comp.js_lib(book, outputs, outputs);
+        // The upstream module emitter selects roots from order. Keep all
+        // definitions available, but expose only the requested host edge.
+        return Comp.js_lib({ ...book, order: outputs }, true);
       } catch (cause) {
         throw rejected(cause, { target: "js-library" });
       }
     },
     formatError(error) {
-      return formatBendError(Bend, error);
+      return Main.book_err(error);
     },
   };
   return runtime;
@@ -529,24 +530,4 @@ function expectStep(
 
 function unstable(): PocError {
   return new PocError("UNSTABLE_INPUTS", "source inputs changed during compilation");
-}
-
-// The checker's own rendering of a rejection (main.ts book_err): a kernel
-// error by err_show, a stack overflow by its note, anything else (the
-// compiler's Error, a thrown string) by String.
-function formatBendError(Bend: BendModule, error: unknown): string {
-  if (error instanceof RangeError) {
-    return "Error: the machine stack overflowed (a deep recursion, or a"
-      + " literal too large to expand)";
-  }
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "$" in error &&
-    (error as { $?: unknown }).$ === "Err" &&
-    typeof Bend.err_show === "function"
-  ) {
-    return Bend.err_show(error);
-  }
-  return String(error);
 }

@@ -25,8 +25,8 @@ function poc_try(action) {
   }
 }
 
-// An asynchronous capability: the host's IO loop awaits the returned promise
-// and resumes the Bend continuation with its Result.
+// An asynchronous capability: Bend's scheduler parks the continuation until
+// the Promise settles with its Result.
 function poc_await(action) {
   return Promise.resolve().then(action).then(poc_done, poc_fail);
 }
@@ -87,8 +87,8 @@ function poc_entry_rule(rule) {
 function poc_late_fill(fill) {
   return {
     $: CID(LateFill),
-    declared: BigInt(fill.declared),
-    filled: BigInt(fill.filled),
+    declared: fill.declared,
+    filled: fill.filled,
     flags: poc_list(fill.flags, (flag) => ({
       $: flag === "FillForeign" ? CID(FillForeign) : CID(FillUnsafe),
     })),
@@ -136,8 +136,14 @@ function host_load_fills(root, namespace, steps) {
 function poc_verdict(verdict) {
   return {
     $: CID(Verdict),
-    todos: BigInt(verdict.todos),
+    todos: verdict.todos,
     reliant: poc_list(verdict.reliant, (name) => name),
+    report: verdict.report.$ === "Pass"
+      ? poc_done(verdict.report.message)
+      : { $: CID(Fail), error: verdict.report.message },
+    unsafe_report: verdict.unsafeReport.$ === "Pass"
+      ? poc_done(verdict.unsafeReport.message)
+      : { $: CID(Fail), error: verdict.unsafeReport.message },
   };
 }
 
@@ -257,26 +263,24 @@ function host_cache_gc(cache, live) {
   return poc_try(() => JSON.stringify(poc_host().cacheGc(cache, poc_list_to_array(live))));
 }
 
-// Bend 2.0.27 effect sources register each implementation explicitly. The
-// compiler substitutes each constructor marker below with the id assigned to
-// that foreign definition in this program.
-io_eff(CID(Host.Host.cache_root), host_cache_root);
-io_eff(CID(Host.Host.compiler_inputs), host_compiler_inputs);
-io_eff(CID(Host.Host.load_steps), host_load_steps);
-io_eff(CID(Host.Host.load_fills), host_load_fills);
-io_eff(CID(Host.Host.state_get), host_state_get);
-io_eff(CID(Host.Host.state_get_longest), host_state_get_longest);
-io_eff(CID(Host.Host.state_foreigns), host_state_foreigns);
-io_eff(CID(Host.Host.stage_start), host_stage_start);
-io_eff(CID(Host.Host.stage_commit), host_stage_commit);
-io_eff(CID(Host.Host.stage_abort), host_stage_abort);
-io_eff(CID(Host.Host.book_check), host_book_check);
-io_eff(CID(Host.Host.output_path), host_output_path);
-io_eff(CID(Host.Host.artifact_restore), host_artifact_restore);
-io_eff(CID(Host.Host.output_remove), host_output_remove);
-io_eff(CID(Host.Host.artifact_build), host_artifact_build);
-io_eff(CID(Host.Host.roots_put), host_roots_put);
-io_eff(CID(Host.Host.roots_live), host_roots_live);
-io_eff(CID(Host.Host.cache_status), host_cache_status);
-io_eff(CID(Host.Host.cache_verify), host_cache_verify);
-io_eff(CID(Host.Host.cache_gc), host_cache_gc);
+// Markers are relative to the importing Bend module's namespace.
+io_eff(CID(Host.cache_root), host_cache_root);
+io_eff(CID(Host.compiler_inputs), host_compiler_inputs);
+io_eff(CID(Host.load_steps), host_load_steps);
+io_eff(CID(Host.load_fills), host_load_fills);
+io_eff(CID(Host.state_get), host_state_get);
+io_eff(CID(Host.state_get_longest), host_state_get_longest);
+io_eff(CID(Host.state_foreigns), host_state_foreigns);
+io_eff(CID(Host.stage_start), host_stage_start);
+io_eff(CID(Host.stage_commit), host_stage_commit);
+io_eff(CID(Host.stage_abort), host_stage_abort);
+io_eff(CID(Host.book_check), host_book_check);
+io_eff(CID(Host.output_path), host_output_path);
+io_eff(CID(Host.artifact_restore), host_artifact_restore);
+io_eff(CID(Host.output_remove), host_output_remove);
+io_eff(CID(Host.artifact_build), host_artifact_build);
+io_eff(CID(Host.roots_put), host_roots_put);
+io_eff(CID(Host.roots_live), host_roots_live);
+io_eff(CID(Host.cache_status), host_cache_status);
+io_eff(CID(Host.cache_verify), host_cache_verify);
+io_eff(CID(Host.cache_gc), host_cache_gc);

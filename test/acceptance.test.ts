@@ -5,7 +5,7 @@
 // cache persists across the steps of a history, and each step runs in a new
 // process, so every history is also a restart test.
 //
-// Environment: POC_APP_LIB, POC_BEND2_SOURCE, POC_HASHES_SOURCE and BEND.
+// Environment: POC_APP_JS, POC_BEND2_SOURCE, POC_HASHES_SOURCE and BEND.
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -19,7 +19,7 @@ const required = (name: string): string => {
   return value;
 };
 const bend = required("BEND");
-required("POC_APP_LIB");
+required("POC_APP_JS");
 required("POC_BEND2_SOURCE");
 required("POC_HASHES_SOURCE");
 const cli = path.join(import.meta.dir, "..", "src", "cli.ts");
@@ -127,6 +127,52 @@ def main() -> IO(Unit):
 `;
 
 describe("incremental histories agree with cold checks", () => {
+  test("explicit unsafe checking preserves strict certification across restored states", () => {
+    const h = new History();
+    h.write("Unsafe.bend", "import Base\n\n@unsafe\ndef assumed(a: Nat) -> Nat:\n  a\n");
+    h.write("E.bend", "import Base\nimport ./Unsafe.bend as U\n\ndef result() -> Nat:\n  U.assumed(1n)\n");
+    const compare = (allowUnsafe: boolean): Run & { trace: string } => {
+      const flags = allowUnsafe ? ["--allow-unsafe"] : [];
+      const cold = run([bend, "E.bend", "--check-only", ...flags], h.dir, {});
+      const result = h.poc(["check", ...flags, "E.bend"], true);
+      const stderr = result.stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n");
+      expect({ code: result.code, stdout: result.stdout, stderr }).toEqual(cold);
+      return { ...result, stderr, trace: result.stderr };
+    };
+    const permitted = compare(true);
+    expect(permitted.code).toBe(0);
+    expect(permitted.stdout).toContain("ALL TERMS CHECK\nNot an assumption-free proof verdict.");
+    expect(permitted.stdout).toContain("Assumes @unsafe:");
+    expect(permitted.stdout).not.toContain("ALL PROOFS CHECK");
+    const strict = compare(false);
+    expect(strict.code).toBe(1);
+    expect(strict.stderr).toContain("SOME PROOFS FAIL");
+    expect(strict.trace).not.toContain("bookCheck");
+    expect(compare(true).trace).not.toContain("bookCheck");
+    h.write("ImportE.bend", "import Base\nimport ./E.bend as E\n");
+    const coldModule = run([bend, "ImportE.bend", "--check-only", "--allow-unsafe"], h.dir, {});
+    for (const flags of [["--module", "--allow-unsafe"], ["--allow-unsafe", "--module"]]) {
+      expect(h.poc(["check", ...flags, "E.bend"])).toEqual(coldModule);
+    }
+    expect(run([bend, "E.bend", "--check-only", "--allow-unsafe", "--verdict"], h.dir, {}).code).toBe(1);
+  }, 900_000);
+
+  test("unsafe checking does not permit foreign assumptions or open laws", () => {
+    const h = new History();
+    for (const [entry, source] of [
+      ["Foreign.bend", 'import Base\n\ndef assumed() -> IO(U32):\n  import "./foreign.js"\n'],
+      ["Open.bend", "import Base\n\nlaw missing:\n  Nat\n"],
+    ] as const) {
+      h.write(entry, source);
+      h.write("foreign.js", "function assumed() { return 1; }\n");
+      const cold = run([bend, entry, "--check-only", "--allow-unsafe"], h.dir, {});
+      const poc = h.poc(["check", "--allow-unsafe", entry]);
+      expect(poc).toEqual(cold);
+      expect(poc.code).toBe(1);
+      expect(poc.stderr).toContain("SOME PROOFS FAIL");
+      expect(poc.stderr).toContain(entry === "Foreign.bend" ? "foreign effects" : "1 TODO found.");
+    }
+  }, 900_000);
   test("entry edit, final-module edit, failed extension, branch from an old state", () => {
     const h = new History();
     h.write("P.bend", P);
@@ -257,7 +303,7 @@ def main() -> IO(Unit):
     h.write("M.bend", M("5n"));
     h.write("E.bend", E("signed"));
     h.agree("E.bend");
-    const objects = path.join(h.cache, "bend-proof-of-compile", "v3", "objects");
+    const objects = path.join(h.cache, "bend-proof-of-compile", "v4", "objects");
     const metas = (): string[] => fs.readdirSync(objects).flatMap((bucket) =>
       fs.readdirSync(path.join(objects, bucket))
         .filter((name) => !name.includes(".tmp-"))

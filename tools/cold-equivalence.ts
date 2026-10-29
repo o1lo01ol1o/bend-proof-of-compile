@@ -6,7 +6,7 @@
 //
 //   bun tools/cold-equivalence.ts [--emit] [--jobs N] [--rounds N] (DIR | FILE)...
 //
-// Environment: POC_APP_LIB, POC_BEND2_SOURCE, POC_HASHES_SOURCE (as for the
+// Environment: POC_APP_JS, POC_BEND2_SOURCE, POC_HASHES_SOURCE (as for the
 // CLI), BEND (the checker's CLI), TMPDIR (the shared cache lives there).
 // A second round rechecks every file against the warm cache.
 import * as fs from "node:fs";

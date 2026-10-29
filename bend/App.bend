@@ -35,6 +35,7 @@ type Emission is Data:
 
 type Mode is Data:
   Checking{}
+  CheckingUnsafe{}
   Emitting{emission: Emission}
 
 # One build's fixed context.
@@ -382,7 +383,7 @@ def App.rule.laws(loaded: Bool) -> Maybe<&2, String>:
     case True{}:
       None{}
     case False{}:
-      Some{"bend: PROOF.bend must import ./LAWS.bend (see bend --help)"}
+      Some{"SOME PROOFS FAIL\nError: PROOF.bend must import ./LAWS.bend"}
 
 def App.rule.at(rule: H.EntryRule, +steps: List<&2, H.LoadStep>) -> Maybe<&2, String>:
   match rule:
@@ -411,43 +412,6 @@ def App.todos.plural(+todos: Nat, zero: Bool) -> Maybe<&2, String>:
 
 def App.todos(+todos: Nat) -> Maybe<&2, String>:
   App.todos.plural(todos, Nat.is_eq(todos, 0n))
-
-# The checker's report on an entry: `All terms check.`, or the entry's own
-# claims that rely on @unsafe or foreign code (main.ts cli_report).
-def App.report.lines(names: List<&2, String>) -> String:
-  match names:
-    case Nil{}:
-      ""
-    case name <> rest:
-      String.concat("\n- " <> name <> App.report.lines(rest) <> Nil{})
-
-def App.report.count(+count: Nat) -> String:
-  String.concat(
-    "All terms check, but "
-      <> Nat.show(count)
-      <> Bool.pick(String, Nat.is_eq(count, 1n), " def relies", " defs rely")
-      <> " on unsafe or foreign code:"
-      <> Nil{}
-  )
-
-def App.report(reliant: List<&2, String>) -> String:
-  match reliant:
-    case Nil{}:
-      "All terms check."
-    case +name <> +rest:
-      String.append(
-        App.report.count(List.length(&2, String, name <> rest)),
-        App.report.lines(name <> rest)
-      )
-
-# Before an emit, the checker notes the report on stderr, and says nothing
-# when no claim relies on a promise.
-def App.note(reliant: List<&2, String>) -> IO(Unit):
-  match reliant:
-    case Nil{}:
-      IO.pure(Unit, Unit{})
-    case +name <> +rest:
-      IO.print_err(App.report(name <> rest))
 
 # The checker refuses to write over a file the program reads (a loaded file
 # or a foreign file its records name), or a directory.
@@ -582,6 +546,8 @@ def App.purpose(mode: Mode) -> String:
   match mode:
     case Checking{}:
       "check"
+    case CheckingUnsafe{}:
+      "check"
     case Emitting{Emission{output, target}}:
       target
 
@@ -612,6 +578,14 @@ def App.keep(
 
 def App.fail(message: String) -> IO(Unit):
   IO.die(Unit, 1, message)
+
+# Render the canonical Bend report without duplicating proof policy here.
+def App.report(report: Result<&2, &2, String, String>) -> IO(Unit):
+  match report:
+    case Fail{error}:
+      App.fail(error)
+    case Done{message}:
+      IO.print(message)
 
 def App.success(message: String) -> IO(Unit):
   IO.print(message)
@@ -707,7 +681,6 @@ def App.emit(
   +reliant: List<&2, String>
 ) -> IO(Unit):
   do IO<Unit>:
-    App.note(reliant)
     found : Result<&2, &2, String, Maybe<&2, List<&2, H.NamedBytes>>> <- H.Host.state_foreigns(
       App.cache(build),
       M.Digest.hex(final)
@@ -720,11 +693,15 @@ def App.accepted(
   +final: M.Digest,
   state: H.Checkpoint,
   +reliant: List<&2, String>,
+  report: Result<&2, &2, String, String>,
+  unsafe_report: Result<&2, &2, String, String>,
   mode: Mode
 ) -> IO(Unit):
   match mode:
     case Checking{}:
-      IO.print(App.report(reliant))
+      App.report(report)
+    case CheckingUnsafe{}:
+      App.report(unsafe_report)
     case Emitting{emission}:
       App.emit(build, emission, order, final, state, reliant)
 
@@ -734,13 +711,15 @@ def App.judged.todos(
   +final: M.Digest,
   state: H.Checkpoint,
   +reliant: List<&2, String>,
+  report: Result<&2, &2, String, String>,
+  unsafe_report: Result<&2, &2, String, String>,
   rejected: Maybe<&2, String>
 ) -> IO(Unit):
   match rejected:
     case Some{error}:
-      App.fail(error)
+      App.fail(String.append("SOME PROOFS FAIL\n", error))
     case None{}:
-      App.accepted(build, order, final, state, reliant, App.mode(build))
+      App.accepted(build, order, final, state, reliant, report, unsafe_report, App.mode(build))
 
 # A final state, stable (and committed), is judged as the checker judges an
 # entry; an accepted state is reported, and emitted when asked.
@@ -752,10 +731,10 @@ def App.judged(
   verdict: H.Verdict
 ) -> IO(Unit):
   match verdict:
-    case H.Verdict{+todos, reliant}:
+    case H.Verdict{+todos, reliant, report, unsafe_report}:
       do IO<Unit>:
         App.keep(build, order, M.Digest.hex(final) <> Nil{})
-        App.judged.todos(build, order, final, state, reliant, App.todos(todos))
+        App.judged.todos(build, order, final, state, reliant, report, unsafe_report, App.todos(todos))
 
 # Newly checked states stay provisional until the load order is observed
 # again, unchanged, so an input race cannot poison a content-addressed state.
@@ -997,9 +976,7 @@ def App.restored.stable(
         H.Host.output_remove(output)
         App.fail(String.append(error, "; output was removed"))
     case None{}:
-      do IO<Unit>:
-        App.note(reliant)
-        App.success("restored artifact from cache")
+      App.success("restored artifact from cache")
 
 def App.artifact_restored(
   +build: Build,
@@ -1094,6 +1071,8 @@ def App.ordered(
 ) -> IO(Unit):
   match mode:
     case Checking{}:
+      App.state_get(build, order, latest, final)
+    case CheckingUnsafe{}:
       App.state_get(build, order, latest, final)
     case Emitting{emission}:
       do IO<Unit>:
@@ -1198,6 +1177,12 @@ def Cli.build.options(
 
 def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
   match args:
+    case "check" <> "--allow-unsafe" <> "--module" <> entry <> Nil{}:
+      App.build(entry, H.AsModule{}, cache, CheckingUnsafe{})
+    case "check" <> "--module" <> "--allow-unsafe" <> entry <> Nil{}:
+      App.build(entry, H.AsModule{}, cache, CheckingUnsafe{})
+    case "check" <> "--allow-unsafe" <> entry <> Nil{}:
+      App.build(entry, H.AsEntry{}, cache, CheckingUnsafe{})
     case "check" <> "--module" <> entry <> Nil{}:
       App.build(entry, H.AsModule{}, cache, Checking{})
     case "check" <> entry <> Nil{}:
@@ -1212,7 +1197,7 @@ def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
       Cli.gc(cache)
     case _:
       App.fail(
-        "usage: poc check [--module] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
+        "usage: poc check [--module] [--allow-unsafe] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
       )
 
 def Cli.cached(args: List<&1, String>, cache: Result<&2, &2, String, String>) -> IO(Unit):
@@ -1224,10 +1209,17 @@ def Cli.cached(args: List<&1, String>, cache: Result<&2, &2, String, String>) ->
 
 def Cli.program(args: List<&1, String>) -> IO(Unit):
   do IO<Unit>:
-    cache : Result<&2, &2, String, String> <- H.Host.cache_root("bend-proof-of-compile", "v3")
+    cache : Result<&2, &2, String, String> <- H.Host.cache_root("bend-proof-of-compile", "v4")
     Cli.cached(args, cache)
+
+def Cli.invoked(args: List<&1, String>) -> IO(Unit):
+  match args:
+    case Nil{}:
+      Cli.program(Nil{})
+    case _ <> rest:
+      Cli.program(rest)
 
 def main() -> IO(Unit):
   do IO<Unit>:
     args : List<&1, String> <- IO.args()
-    Cli.program(args)
+    Cli.invoked(args)

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { decodePack, encodePack, pathReal } from "./codec.ts";
 import {
+  CAS_SCHEMA,
   reloadTrust,
   statementText,
   verifySignature,
@@ -33,7 +34,7 @@ interface NamedBytes {
 // the records of its whole chain, so an artifact key can be derived without
 // restoring the state. Every object's metadata is signed (trust option (b)):
 // the signature covers its statement, which includes the payload's digest.
-type CasMetadata = Statement & { readonly schema: 3; readonly signature: Signature };
+type CasMetadata = Statement & { readonly schema: typeof CAS_SCHEMA; readonly signature: Signature };
 
 type CasKind = Statement["kind"];
 
@@ -558,7 +559,7 @@ function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): Cas
   }
   const value = raw as Record<string, unknown>;
   if (
-    value.schema !== 3 ||
+    value.schema !== CAS_SCHEMA ||
     value.kind !== expectedKind ||
     value.key !== key ||
     typeof value.bytes !== "number" ||
@@ -574,7 +575,7 @@ function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): Cas
     return invalid();
   }
   const common = {
-    schema: 3,
+    schema: CAS_SCHEMA,
     key,
     payloadSha256: value.payloadSha256,
     bytes: value.bytes,
@@ -736,7 +737,7 @@ function putCasObjects(publications: readonly Publication[]): void {
   pending.forEach((publication, index) => {
     const statement = statements[index] as Statement;
     const signature = signatures[index] as Signature;
-    writeCasObject(publication, { ...statement, schema: 3, signature });
+    writeCasObject(publication, { ...statement, schema: CAS_SCHEMA, signature });
   });
 }
 

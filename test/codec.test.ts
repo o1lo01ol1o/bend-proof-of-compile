@@ -51,7 +51,7 @@ describe("packs", async () => {
   test("golden vectors pin the wire text", () => {
     expect(sealed.length).toBe(2);
     for (const [index, pack] of sealed.entries()) {
-      const file = path.join(golden, `pack-v3-${index}.json`);
+      const file = path.join(golden, `pack-v4-${index}.json`);
       if (process.env.POC_UPDATE_GOLDEN === "1") {
         fs.writeFileSync(file, `${abstract(pack.wire)}\n`);
       }
@@ -68,7 +68,7 @@ describe("packs", async () => {
   test("decode then encode is the identity on each golden pack", () => {
     let parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     for (let index = 0; index < sealed.length; index += 1) {
-      const text = concrete(fs.readFileSync(path.join(golden, `pack-v3-${index}.json`), "utf8").trimEnd());
+      const text = concrete(fs.readFileSync(path.join(golden, `pack-v4-${index}.json`), "utf8").trimEnd());
       const pack = decodePackWire(runtime, text);
       const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map(parent.seen) };
       pack.apply(child);
@@ -114,13 +114,13 @@ describe("packs", async () => {
     const restored: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     decodePackWire(runtime, first.wire).apply(restored);
     const child = runtime.Main.book_over(restored.book);
-    const law = child.tlds["P.later"];
+    const law = child.tlds["P:later"];
     if (law === undefined) {
       throw new Error("the fixture's law is missing");
     }
-    child.tlds["P.later"] = { ...law };
-    expect(Object.hasOwn(child.tlds, "P.later")).toBe(true);
-    expect(restored.book.tlds["P.later"]).toBe(law);
+    child.tlds["P:later"] = { ...law };
+    expect(Object.hasOwn(child.tlds, "P:later")).toBe(true);
+    expect(restored.book.tlds["P:later"]).toBe(law);
   });
 
   test("malformed packs are rejected", () => {
@@ -133,6 +133,7 @@ describe("packs", async () => {
       expect(() => decodePackWire(runtime, JSON.stringify(changed))).toThrow();
     };
     reject({ ...wire, schema: 2 });
+    reject({ ...wire, schema: 3 });
     reject({ ...wire, ctrs: [] });
     reject({ ...wire, last: -1 });
     reject({ ...wire, tlds: [...(wire.tlds as unknown[]), ...(wire.tlds as unknown[])] });

@@ -6,7 +6,27 @@
 
 The architectural rule in `HANDOFF.md` stands: **all semantics live in Bend; TypeScript is only a capability host.** The Bend checker is a capability like any other, so what it reports (its load order, its checked records) is data the Bend application folds into keys; the host still never computes a key or decides invalidation.
 
-## What the fork provides
+## Upstream integration status
+
+The isolated integration targets upstream
+`7a7e6505aeff2101a139a8419e16098ed2a89110`; the fork commits, API examples and
+measurements below describe the pre-integration implementation, not validation
+of this target. Current API/wiring and validation scope are in `HANDOFF.md`.
+The integration uses schema-4 packs/CAS under `v4`, Map-based templates,
+holes-only TODO counts, the loader's seventh-argument observer, and Bend's
+canonical reporter. Explicit `check --allow-unsafe` selects Bend's permitted
+unsafe report without changing default strict proof certification. Cold Bend
+uses `--check-only --allow-unsafe`; both reject foreign dependencies and open laws.
+The policy changes the report, not checked-state cache identity: restored states
+support either report without rechecking. Permitted success says `ALL TERMS CHECK`
+and discloses unsafe assumptions, never `ALL PROOFS CHECK`.
+The executable runs on Bend's Promise-capable scheduler, not an
+application-specific IO interpreter. Downstream pins remain
+unchanged; categorical proof migration and new-target performance/release gates
+are outstanding. No full-flake checks or non-POC bend-categories builds are
+permitted until the coordinated triad bump.
+
+## What the fork provides (historical)
 
 Branch `expose-book-state-api` of `o1lo01ol1o/bend`, on top of `163230d1` (PR #1's `book_read(file, unsafe_seed)`):
 

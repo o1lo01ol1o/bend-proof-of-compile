@@ -51,11 +51,10 @@ type FillFlag is Data:
 type LateFill is Data:
   LateFill{declared: Nat, filled: Nat, flags: List<&2, FillFlag>}
 
-# The checker's judgment of an entry's final state: its count of holes and
-# open laws, and the claims that rely on @unsafe or foreign code (the entry's
-# own definitions plus every non-Base law filled in its import graph).
+# Bend owns both strict proof and explicit unsafe-check reports. Neither
+# report permits foreign assumptions; emission may still use either outcome.
 type Verdict is Data:
-  Verdict{todos: Nat, reliant: List<&2, String>}
+  Verdict{todos: Nat, reliant: List<&2, String>, report: Result<&2, &2, String, String>, unsafe_report: Result<&2, &2, String, String>}
 
 # A check plan is pure Bend data: consecutive groups of load steps. The host
 # loads each group's files into a child of the previous state, checks them

@@ -4,16 +4,19 @@ import { gunzipSync, gzipSync } from "node:zlib";
 
 import type {
   AdtLike,
+  BookRecord,
   BookStateLike,
   CompilerRuntime,
   ConstructorLike,
   DefinitionLike,
   PlainTerm,
+  SourceFileLike,
+  SpanLike,
   TopLevelLike,
 } from "./compiler.ts";
 import { PocError } from "./error.ts";
 
-const PACK_SCHEMA = 3;
+const PACK_SCHEMA = 4;
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
 
@@ -45,6 +48,7 @@ interface WireDefinition<Term> {
   readonly r: readonly string[];
   readonly b?: boolean;
   readonly u?: boolean;
+  readonly l?: boolean;
   readonly i?: readonly string[];
 }
 
@@ -68,12 +72,11 @@ interface WirePack {
   readonly schema: number;
   readonly parent: string | null;
   readonly last: number;
-  readonly sources: readonly string[];
+  readonly sources: readonly SourceFileLike[];
   readonly tlds: readonly (readonly [string, WireTopLevel<WireValue>])[];
   readonly ctrs: readonly string[];
   readonly order: readonly string[];
   readonly hols: number;
-  readonly open: number;
   readonly tmps: readonly (readonly [string, readonly (readonly [string, string])[]])[];
   readonly seen: readonly (readonly [string, string | null])[];
 }
@@ -94,6 +97,7 @@ export function referencesOf(runtime: CompilerRuntime, tld: TopLevelLike): reado
   const out = new Set<string>();
   const seen = new Set<object>();
   if (tld.$ === "ADT") {
+    termRefs(runtime.Bend.term_lower(tld.T), out, seen);
     for (const constructor of tld.c) {
       termRefs(runtime.Bend.term_lower(constructor.T), out, seen);
     }
@@ -106,17 +110,15 @@ export function referencesOf(runtime: CompilerRuntime, tld: TopLevelLike): reado
 
 // What the checker's report reads of a record: whether it is a promise
 // (@unsafe, or foreign outside Base) and the names it refers to.
-export interface RecordSummary {
-  readonly promise: boolean;
-  readonly refs: readonly string[];
-}
+export type RecordSummary = BookRecord;
 
 // Summaries of records not raised yet, per restored table, read from the
 // wire, so a report never raises a restored record.
 const pending = new WeakMap<object, Map<string, RecordSummary>>();
 
-function promiseOf(tld: TopLevelLike): boolean {
-  return tld.$ === "Def" && (tld.u === true || (tld.i !== undefined && tld.b !== true));
+function promiseOf(tld: TopLevelLike): BookRecord["promise"] {
+  return tld.$ === "Def" && tld.u === true ? "unsafe"
+    : tld.$ === "Def" && tld.i !== undefined && tld.b !== true ? "foreign" : null;
 }
 
 // The summary of the record `name` resolves to through a chain of tables.
@@ -132,7 +134,12 @@ export function summaryOf(
     }
     if ("value" in descriptor) {
       const tld = descriptor.value as TopLevelLike;
-      return { promise: promiseOf(tld), refs: referencesOf(runtime, tld) };
+      return {
+        base: tld.b === true,
+        law: tld.$ === "Def" && tld.l === true,
+        promise: promiseOf(tld),
+        refs: referencesOf(runtime, tld),
+      };
     }
     return pending.get(level)?.get(name);
   }
@@ -201,7 +208,7 @@ export function encodePackWire(
       }
       return [name, encodeTopLevel(runtime, tld, (term) => runtime.Bend.term_lower(term))] as const;
     });
-    const sources: string[] = [];
+    const sources: SourceFileLike[] = [];
     const sourceIds = new Map<string, number>();
     const records = JSON.stringify(tlds, function (this: unknown, _key: string, value: unknown): unknown {
       if (typeof value === "number" && !Number.isFinite(value)) {
@@ -211,11 +218,20 @@ export function encodePackWire(
         throw new PocError("CODEC", "lowered term contains a non-data value", { type: typeof value });
       }
       if (typeof value === "object" && value !== null && !Array.isArray(value) && isSpan(value)) {
-        let sourceId = sourceIds.get(value.src);
+        // A parser is also a File, but its extra fields include a cyclic book.
+        // Persist only the File interface needed for diagnostics and name display.
+        const file = value.file;
+        const source: SourceFileLike = {
+          str: file.str,
+          ns: file.ns,
+          al: Object.fromEntries(Object.entries(file.al).sort(byName)),
+        };
+        const key = JSON.stringify(source);
+        let sourceId = sourceIds.get(key);
         if (sourceId === undefined) {
           sourceId = sources.length;
-          sources.push(value.src);
-          sourceIds.set(value.src, sourceId);
+          sources.push(source);
+          sourceIds.set(key, sourceId);
         }
         return { $span: [sourceId, value.beg, value.end] } satisfies WireSpan;
       }
@@ -234,8 +250,8 @@ export function encodePackWire(
     const tmps: Array<readonly [string, Array<readonly [string, string]>]> = [];
     for (const name of Object.keys(book.tmps).sort()) {
       const inherited = parent.book.tmps[name];
-      const added = Object.entries(book.tmps[name] ?? {})
-        .filter(([key]) => inherited === undefined || !Object.hasOwn(inherited, key))
+      const added = [...(book.tmps[name] ?? new Map<string, string>())]
+        .filter(([key]) => inherited === undefined || !inherited.has(key))
         .sort(byName);
       if (added.length > 0) {
         tmps.push([name, added]);
@@ -247,7 +263,6 @@ export function encodePackWire(
       ctrs: Object.keys(book.ctrs).sort(),
       order: book.order.slice(done),
       hols: book.hols,
-      open: book.open,
       tmps,
       seen: [...child.seen.entries()].filter(([file]) => !parent.seen.has(file)).sort(byName),
     } satisfies Omit<WirePack, "schema" | "parent" | "last" | "sources" | "tlds">);
@@ -320,7 +335,17 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
     }
     const parent = root.parent === null ? null : string(root.parent, "pack.parent");
     const last = nonNegativeInteger(root.last, "pack.last");
-    const sources = stringArray(root.sources, "pack.sources");
+    const sources = array(root.sources, "pack.sources").map((value, index): SourceFileLike => {
+      const location = `pack.sources[${index}]`;
+      const raw = record(value, location);
+      const aliases = record(raw.al, `${location}.al`);
+      return {
+        str: string(raw.str, `${location}.str`),
+        ns: string(raw.ns, `${location}.ns`),
+        al: Object.fromEntries(Object.entries(aliases).map(([key, item]) =>
+          [key, string(item, `${location}.al.${key}`)])),
+      };
+    });
 
     // Names and constructor ownership are parsed now; terms when first read.
     const tlds = new Map<
@@ -354,7 +379,10 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
       tlds.set(name, {
         adt: tag === "ADT",
         summary: {
-          promise: tag === "Def" && (raw.u === true || (foreign && raw.b !== true)),
+          base: raw.b === true,
+          law: tag === "Def" && raw.l === true,
+          promise: tag === "Def" && raw.u === true ? "unsafe"
+            : tag === "Def" && foreign && raw.b !== true ? "foreign" : null,
           refs: stringArray(raw.r, `${location}.r`),
         },
         raise: () => {
@@ -374,7 +402,6 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
     }
     const order = stringArray(root.order, "pack.order").map(intern);
     const hols = nonNegativeInteger(root.hols, "pack.hols");
-    const open = nonNegativeInteger(root.open, "pack.open");
     const tmps: Array<readonly [string, Array<readonly [string, string]>]> = [];
     for (const [index, rawEntry] of array(root.tmps, "pack.tmps").entries()) {
       const pair = tuple(rawEntry, 2, `pack.tmps[${index}]`);
@@ -427,14 +454,13 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
         }
         book.order.push(...order);
         book.hols = hols;
-        book.open = open;
         for (const [name, entries] of tmps) {
-          const table = book.tmps[name] ?? (Object.create(null) as Record<string, string>);
+          const table = book.tmps[name] ?? new Map<string, string>();
           for (const [key, value] of entries) {
-            if (Object.hasOwn(table, key)) {
+            if (table.has(key)) {
               throw new PocError("CODEC", `pack redefines template key ${name} ${key}`);
             }
-            table[key] = value;
+            table.set(key, value);
           }
           book.tmps[name] = table;
         }
@@ -507,6 +533,7 @@ function encodeTopLevel(
     r,
     ...(tld.b === undefined ? {} : { b: tld.b }),
     ...(tld.u === undefined ? {} : { u: tld.u }),
+    ...(tld.l === undefined ? {} : { l: tld.l }),
     ...(tld.i === undefined ? {} : { i: tld.i.map(pathReal) }),
   };
 }
@@ -521,7 +548,7 @@ export function pathReal(file: string): string {
 function decodeTopLevel(
   runtime: CompilerRuntime,
   raw: Record<string, unknown>,
-  sources: readonly string[],
+  sources: readonly SourceFileLike[],
   location: string,
 ): TopLevelLike {
   const references = stringArray(raw.r, `${location}.r`);
@@ -554,6 +581,7 @@ function decodeTopLevel(
     };
     assignOptionalBoolean(definition, "b", raw.b, `${location}.b`);
     assignOptionalBoolean(definition, "u", raw.u, `${location}.u`);
+    assignOptionalBoolean(definition, "l", raw.l, `${location}.l`);
     if (raw.i !== undefined) {
       definition.i = stringArray(raw.i, `${location}.i`);
     }
@@ -566,7 +594,7 @@ function decodeTopLevel(
 function higher(
   runtime: CompilerRuntime,
   value: unknown,
-  sources: readonly string[],
+  sources: readonly SourceFileLike[],
   location: string,
 ): ReturnType<CompilerRuntime["Bend"]["term_higher"]> {
   return runtime.Bend.term_higher(restoreValue(value, sources, location) as PlainTerm);
@@ -590,7 +618,7 @@ function intern(text: string): string {
   return atom;
 }
 
-function restoreValue(value: unknown, sources: readonly string[], location: string): unknown {
+function restoreValue(value: unknown, sources: readonly SourceFileLike[], location: string): unknown {
   if (typeof value === "string") {
     return intern(value);
   }
@@ -613,14 +641,14 @@ function restoreValue(value: unknown, sources: readonly string[], location: stri
     }
     const encoded = tuple(raw.$span, 3, `${location}.$span`);
     const sourceId = nonNegativeInteger(encoded[0], `${location}.$span[0]`);
-    const src = sources[sourceId];
-    if (src === undefined) {
+    const file = sources[sourceId];
+    if (file === undefined) {
       throw new PocError("CODEC", `span source is out of range at ${location}`, {
         sourceId,
       });
     }
     return {
-      src,
+      file,
       beg: nonNegativeInteger(encoded[1], `${location}.$span[1]`),
       end: nonNegativeInteger(encoded[2], `${location}.$span[2]`),
     };
@@ -632,10 +660,12 @@ function restoreValue(value: unknown, sources: readonly string[], location: stri
   return output;
 }
 
-function isSpan(value: object): value is { src: string; beg: number; end: number } {
-  const raw = value as { src?: unknown; beg?: unknown; end?: unknown };
+function isSpan(value: object): value is SpanLike {
+  const raw = value as Partial<SpanLike>;
   return (
-    typeof raw.src === "string" &&
+    typeof raw.file === "object" && raw.file !== null &&
+    typeof raw.file.str === "string" && typeof raw.file.ns === "string" &&
+    typeof raw.file.al === "object" && raw.file.al !== null &&
     Number.isInteger(raw.beg) &&
     Number.isInteger(raw.end) &&
     Object.keys(value).length === 3
