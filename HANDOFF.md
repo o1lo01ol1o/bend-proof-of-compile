@@ -10,22 +10,25 @@ parsing, Git whitespace checks and metadata-only setup checks also pass. This is
 release gate. The isolated POC flake now pins local Bend checkpoint
 `1b8140bfea9023a5d2bd35164e1654df5f4e8822` (2.0.39), including the
 explicit unsafe-checking extension. This machine-local pin is not publishable.
-The coordinated categories dependency bump and rebuilt package validation are
-in progress; no bend-categories full-flake checks or non-POC builds are permitted
-before that bump. Historical performance/corpus results below are not new-target
-measurements.
+The coordinated local bump is complete: categories checkpoint
+`f4eb08fb797ab1bf4b4500f724ff0023acc76f1c` pins POC
+`0a40fcaedd542439035011917a8108b7cc1b14b2` and the same Bend revision.
+Both flakes expose the same rebuilt POC package. Categories full-flake/corpus
+validation has not run; its tooling still needs migration. Historical
+performance/corpus results below are not new-target measurements.
 
-Before the explicit unsafe-checking extension, POC Nix packaging and install
-checks passed with a command-local local-Bend input override and
-`--no-write-lock-file`; both POC and categories lockfiles were unchanged. The package is
-`/nix/store/v5cycf8mjgpg8bbdlj65p3vrri53bdkm-proof-of-compile-0.1.0`.
-Its suite passed 24 tests with one Node-dependent skip (932 assertions); the
-then-current local suite passed all 25 tests (933 assertions). See
-`../validation/poc-nix-build.log` and `package-locks.{before,after}`. This validates
-macOS packaging, not Linux sandbox purity (the host sandbox is disabled).
-The current local suite passes 27 tests (955 assertions), including explicit
-unsafe checking and strict policy preservation across restored caches; TypeScript
-checking passes. The package has not been rebuilt for this extension.
+The rebuilt POC Nix package includes the unsafe-checking extension and passes
+build and install checks:
+`/nix/store/dzxyrpqy5x3hipdrnlxfxzwn1q8x6cnv-proof-of-compile-0.1.0`.
+Its suite passes 26 tests with one Node-dependent skip (954 assertions). Install
+checks cover prefix/artifact restoration, later law fills, cache trust and cold
+versus installed unsafe-mode reports followed by strict restored rejection. See
+`../validation/poc-nix-bumped-build.log`; categories resolves that same output in
+`../validation/categories-poc-bumped-build.log`. This validates macOS packaging,
+not Linux sandbox purity (the host sandbox is disabled). The local suite passes
+all 27 tests (955 assertions), including Node, and TypeScript checking passes.
+The older `poc-nix-build.log` and `package-locks.{before,after}` predate the
+coordinated local pin changes and are historical evidence, not current lock hashes.
 
 Focused categories POC smoke matches cold checking for `PROOF.bend` and
 `tests/Smoke.bend`, including shared-prefix reuse. An unsafe contraction fixture
@@ -41,6 +44,11 @@ fail. `--allow-unsafe` is incompatible with `--verdict` on the cold CLI.
 The real `src/Categories/Category_Unsafe.bend` passes in permitted mode and fails
 in strict mode, with cold/POC stream equivalence and restored policy switches
 requiring no bookCheck; see `../validation/categories-poc-allow-unsafe.json`.
+The exact installed package exposed through categories also passes PROOF/Smoke
+cold equivalence and unsafe/strict restored-policy switches, with no inherited
+source/app overrides: `../validation/categories-poc-bumped-smoke.json` (reproduce
+with `python3 ../validation/check-bumped-poc.py`). Local revision pins are
+machine-specific and must be replaced before publishing.
 This is a fork-maintained CLI extension, not a changed checker judgment.
 Existing categories audit rules, verdict parsers and certification gates remain
 unmigrated. Checked-book cache publication is not proof certification: a
