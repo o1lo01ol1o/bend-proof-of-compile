@@ -17,9 +17,9 @@
     };
 
     bend-src = {
-      # Bend 2.0.27 plus checked-book replay and bounded alpha-congruence.
-      # Pin perf/bounded-alpha-congruence by revision, matching bend-categories.
-      url = "github:o1lo01ol1o/bend/1ee1ac9056175e594e5c500770877d818814debc";
+      # Isolated triad checkpoint on upstream 7a7e6505: checked-book replay,
+      # Promise runtime and explicit unsafe checking. Local pin, not a release.
+      url = "git+file:///Users/timpierson/Work/bend-triad-7a7e6505/bend?rev=1b8140bfea9023a5d2bd35164e1654df5f4e8822";
       flake = false;
     };
 
@@ -46,7 +46,7 @@
       ...
     }:
     let
-      bendVersion = "2.0.27";
+      bendVersion = "2.0.39";
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
       checkScript = ''
         set -euo pipefail
@@ -63,7 +63,7 @@
         def hash_smoke() -> String:
           Hashes.SHA256.text("proof-of-compile")
         EOF
-        bend "$tmp_dir/hash-smoke.bend" --check-only | grep -q '^All terms check'
+        bend "$tmp_dir/hash-smoke.bend" --check-only | grep -q '^ALL PROOFS CHECK$'
 
         cat > "$tmp_dir/api-smoke.ts" <<EOF
         import * as Bend from "$BEND2_SRC/bend.ts";
@@ -165,15 +165,16 @@
 
               mkdir -p vendor dist
               ln -s ${bendHashes}/share/bend/hashes vendor/bend-hashes
-              bend bend/App.bend --check-only
-              bun src/build-bend-lib.ts \
+              # The capability application is well typed but relies on foreign
+              # code; proof validation is distinct from compiling an IO program.
+              bun src/build-bend-app.ts \
                 ${bend}/share/bend/bend2 \
                 bend/App.bend \
-                dist/app-lib.js
+                dist/app.js
 
               # Codec laws and golden vectors, the hash against Node's, and
               # incremental histories against the pinned checker's CLI.
-              POC_APP_LIB="$PWD/dist/app-lib.js" \
+              POC_APP_JS="$PWD/dist/app.js" \
               POC_BEND2_SOURCE=${bend}/share/bend/bend2 \
               POC_HASHES_SOURCE=${bendHashes}/share/bend/hashes \
               BEND=${bend}/bin/bend \
@@ -188,10 +189,10 @@
               app="$out/libexec/proof-of-compile"
               mkdir -p "$app" "$out/bin"
               cp -R src "$app/src"
-              cp dist/app-lib.js "$app/app-lib.js"
+              cp dist/app.js "$app/app.js"
               makeWrapper ${pkgs.bun}/bin/bun "$out/bin/proof-of-compile" \
                 --add-flags "$app/src/cli.ts" \
-                --set POC_APP_LIB "$app/app-lib.js" \
+                --set POC_APP_JS "$app/app.js" \
                 --set POC_BEND2_SOURCE ${bend}/share/bend/bend2 \
                 --set POC_HASHES_SOURCE ${bendHashes}/share/bend/hashes
               ln -s proof-of-compile "$out/bin/poc"
@@ -266,6 +267,26 @@
                 --output "$TMPDIR/laws.js" --target js \
                 | grep -q 'built and cached artifact'
               bun "$TMPDIR/laws.js" | grep -q 'law filled later'
+
+              # Installed entrypoints must preserve explicit unsafe checking
+              # and strict proof rejection when restoring the same checked state.
+              mkdir -p "$TMPDIR/unsafe"
+              cat > "$TMPDIR/unsafe/Assumed.bend" <<'EOF'
+              import Base
+              @unsafe
+              def assumed(a: Nat) -> Nat:
+                a
+              EOF
+              bend "$TMPDIR/unsafe/Assumed.bend" --check-only --allow-unsafe > "$TMPDIR/unsafe/cold.out"
+              "$out/bin/poc" check --allow-unsafe "$TMPDIR/unsafe/Assumed.bend" > "$TMPDIR/unsafe/poc.out"
+              cmp "$TMPDIR/unsafe/cold.out" "$TMPDIR/unsafe/poc.out"
+              grep -q '^ALL TERMS CHECK$' "$TMPDIR/unsafe/poc.out"
+              grep -q '^Not an assumption-free proof verdict\.$' "$TMPDIR/unsafe/poc.out"
+              if "$out/bin/poc" check "$TMPDIR/unsafe/Assumed.bend" > "$TMPDIR/unsafe/strict.out" 2> "$TMPDIR/unsafe/strict.err"; then
+                echo 'strict checking accepted unsafe assumptions' >&2
+                exit 1
+              fi
+              grep -q '^SOME PROOFS FAIL$' "$TMPDIR/unsafe/strict.err"
 
               "$out/bin/proof-of-compile" cache verify | grep -q '"quarantined":0'
               "$out/bin/proof-of-compile" cache verify | grep -q '"untrusted":0'

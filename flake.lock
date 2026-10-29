@@ -107,18 +107,18 @@
     "bend-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790545469,
-        "narHash": "sha256-BSRs+fC+TgzwbFb+CbKUPqdINZbwCxx8dQxWrJuHvVw=",
-        "owner": "o1lo01ol1o",
-        "repo": "bend",
-        "rev": "1ee1ac9056175e594e5c500770877d818814debc",
-        "type": "github"
+        "lastModified": 1793278818,
+        "narHash": "sha256-Su9CgZe3cObeJrn8mk9mrnyYPr1TlMUH79JaHjoZMNs=",
+        "ref": "refs/heads/triad/7a7e6505/integration",
+        "rev": "1b8140bfea9023a5d2bd35164e1654df5f4e8822",
+        "revCount": 3411,
+        "type": "git",
+        "url": "file:///Users/timpierson/Work/bend-triad-7a7e6505/bend"
       },
       "original": {
-        "owner": "o1lo01ol1o",
-        "repo": "bend",
-        "rev": "1ee1ac9056175e594e5c500770877d818814debc",
-        "type": "github"
+        "rev": "1b8140bfea9023a5d2bd35164e1654df5f4e8822",
+        "type": "git",
+        "url": "file:///Users/timpierson/Work/bend-triad-7a7e6505/bend"
       }
     },
     "cachix": {
