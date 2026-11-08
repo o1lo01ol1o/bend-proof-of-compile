@@ -15,7 +15,11 @@ acceptance histories against the fork's CLI) and the install check.
   type and value travel as one compressed blob, inflated on the record's
   first read, so a restored chain holds its records' terms at their
   compressed size: one module's 55-pack chain is 260 MB of term JSON, 24 MB
-  compressed) and its elaboration (`elaboration.bin`: one term table,
+  compressed, and restoring it without raising a record went from 1.7 GB
+  resident to 0.3 GB; the warm `poc check` of that module went from 4.8 GB
+  to 3.4 GB, the rest being outside the codec, most likely the Bend-side
+  hashing of the order's source texts) and its elaboration
+  (`elaboration.bin`: one term table,
   `src/term-table.ts`, holding every node of every checked body and every
   cell value lowered at its binder depth, once per distinct content and
   without spans, plus each valued definition's body root). A definition with
