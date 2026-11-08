@@ -123,7 +123,12 @@ let memoizedInputs:
 
 globalThis.POC_HOST = {
   cacheRoot(namespace, version) {
-    const root = path.join(os.tmpdir(), safeSegment(namespace), safeSegment(version));
+    // The writable store: POC_STORE, or a directory under the temporary
+    // directory. Read-only layers (POC_STORE_PATH) are searched after it.
+    const configured = process.env.POC_STORE;
+    const root = configured !== undefined && configured.length > 0
+      ? path.resolve(configured)
+      : path.join(os.tmpdir(), safeSegment(namespace), safeSegment(version));
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     // Integrity does not rest on who can write here: every object is signed,
     // and only objects signed by a trusted key are read (trust option (b)).
@@ -534,9 +539,34 @@ function assertDigest(key: string): void {
   }
 }
 
+// An object's directory in a store.
 function objectDirectory(cache: string, key: string): string {
   assertDigest(key);
   return path.join(cache, "objects", key.slice(0, 2), key);
+}
+
+// Read-only store layers (POC_STORE_PATH, path-delimited): stores searched
+// after the writable one. A layer is never written, quarantined or collected;
+// a Nix store path, or a symlinkJoin of several, is one such layer.
+let memoizedLayers: readonly string[] | undefined;
+
+function storeLayers(): readonly string[] {
+  memoizedLayers ??= (process.env.POC_STORE_PATH ?? "")
+    .split(path.delimiter)
+    .filter((layer) => layer.length > 0)
+    .map((layer) => path.resolve(layer));
+  return memoizedLayers;
+}
+
+// Where an object is: the writable store first, then each layer in order.
+function locateObject(cache: string, key: string): string | null {
+  for (const store of [cache, ...storeLayers()]) {
+    const directory = objectDirectory(store, key);
+    if (fs.existsSync(path.join(directory, "meta.json"))) {
+      return directory;
+    }
+  }
+  return null;
 }
 
 function payloadName(kind: CasKind): string {
@@ -601,8 +631,12 @@ function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): Cas
 // (or no readable kind: a read of it by kind quarantines it).
 function objectKind(cache: string, key: string): CasKind | null {
   try {
+    const directory = locateObject(cache, key);
+    if (directory === null) {
+      return null;
+    }
     const raw = JSON.parse(
-      fs.readFileSync(path.join(objectDirectory(cache, key), "meta.json"), "utf8"),
+      fs.readFileSync(path.join(directory, "meta.json"), "utf8"),
     ) as { kind?: unknown } | null;
     return raw?.kind === "state" || raw?.kind === "artifact" ? raw.kind : null;
   } catch {
@@ -614,11 +648,11 @@ function objectKind(cache: string, key: string): CasKind | null {
 // trusted (a miss, left in place); an error when it is malformed or its
 // signature does not verify (the caller quarantines it).
 function readCasMetadata(cache: string, key: string, kind: CasKind): CasMetadata | null {
-  const metadataPath = path.join(objectDirectory(cache, key), "meta.json");
-  if (!fs.existsSync(metadataPath)) {
+  const directory = locateObject(cache, key);
+  if (directory === null) {
     return null;
   }
-  const metadata = parseCasMetadata(JSON.parse(fs.readFileSync(metadataPath, "utf8")), key, kind);
+  const metadata = parseCasMetadata(JSON.parse(fs.readFileSync(path.join(directory, "meta.json"), "utf8")), key, kind);
   const verdict = verifySignature(metadata, metadata.signature);
   if (verdict === "invalid") {
     throw new Error("CAS signature does not verify");
@@ -650,7 +684,7 @@ function readCasObject(
   if (metadata === null) {
     return null;
   }
-  const payload = fs.readFileSync(path.join(objectDirectory(cache, key), payloadName(kind)));
+  const payload = fs.readFileSync(path.join(locateObject(cache, key) as string, payloadName(kind)));
   if (payload.byteLength !== metadata.bytes || sha256(payload) !== metadata.payloadSha256) {
     throw new Error("CAS payload digest mismatch");
   }
@@ -699,13 +733,14 @@ function signStatements(statements: readonly Statement[]): Signature[] {
   return signatures.map((sig) => ({ key, sig }));
 }
 
-// Publishes objects in order (a pack after the packs it extends). An object
-// already present under a key must hold the same payload; one whose signer is
-// not trusted, or whose signature does not verify, is replaced.
+// Publishes objects in order (a pack after the packs it extends) to the
+// writable store. An object already present under a key, in that store or in
+// a layer, must hold the same payload; one whose signer is not trusted, or
+// whose signature does not verify, is replaced (shadowed, when it is in a
+// layer).
 function putCasObjects(publications: readonly Publication[]): void {
   const pending = publications.filter((publication) => {
-    const directory = objectDirectory(publication.cache, publication.key);
-    if (!fs.existsSync(path.join(directory, "meta.json"))) {
+    if (locateObject(publication.cache, publication.key) === null) {
       return true;
     }
     let existing: { readonly payload: Buffer } | null;
@@ -778,9 +813,14 @@ function atomicWrite(output: string, payload: Uint8Array): void {
   }
 }
 
+// Moves an invalid object of the writable store aside. An invalid object in a
+// read-only layer stays where it is and is a miss.
 function quarantine(cache: string, key: string, reason: unknown): void {
   const source = objectDirectory(cache, key);
   if (!fs.existsSync(source)) {
+    if (locateObject(cache, key) !== null) {
+      debug(`a read-only store layer holds an invalid object ${key}: ${message(reason)}`);
+    }
     return;
   }
   const destination = path.join(

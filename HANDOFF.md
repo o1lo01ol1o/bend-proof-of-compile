@@ -29,6 +29,16 @@ acceptance histories against the fork's CLI) and the install check.
   round trip (the kernel's raise reduces a redex it builds, so the first round
   may store a reduced, equal form), and emission from a state restored
   through real packs.
+- **Layered stores.** `POC_STORE` names the writable store (default
+  `$TMPDIR/bend-proof-of-compile/v4`, as before) and `POC_STORE_PATH`
+  read-only stores searched after it; a Nix store path, or a `symlinkJoin`
+  of several, is one layer. Writes, GC, verification and quarantine act on
+  the writable store only; an invalid object in a layer is a miss. Keys name
+  files by real path, so a layer serves a reader that checks the same real
+  paths (in Nix: the same source store path). The acceptance test "a
+  read-only store layer serves states and artifacts" pins this; trust is
+  unchanged (signatures against the reader's trusted keys), pending D9 in
+  `SPEC-persistent-artifacts.md`.
 - **Constructor datatypes.** Packs keep `Ctr.f` (2.0.40, bendlang/bend
   #2053); without it a type error over a restored prefix crashed in
   rendering (`k.includes` on an undefined name).

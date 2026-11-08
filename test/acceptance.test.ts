@@ -53,6 +53,8 @@ class History {
   readonly dir: string;
   readonly cache: string;
   signer: Record<string, string>;
+  // Read-only store layers this project reads after its own store.
+  layers: string | null = null;
 
   constructor() {
     this.root = fs.mkdtempSync(path.join(os.tmpdir(), "poc-acceptance-"));
@@ -73,8 +75,14 @@ class History {
     return run([process.execPath, cli, ...args], this.dir, {
       TMPDIR: this.cache,
       POC_DEBUG: debug ? "1" : "0",
+      ...(this.layers === null ? {} : { POC_STORE_PATH: this.layers }),
       ...this.signer,
     });
+  }
+
+  // This project's own (writable) store.
+  store(): string {
+    return path.join(this.cache, "bend-proof-of-compile", "v4");
   }
 
   // The step agrees with a cold check and a cold emit; the result is the
@@ -86,7 +94,7 @@ class History {
     const poc = { ...traced, stderr: traced.stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n") };
     expect({ entry, code: poc.code, stdout: poc.stdout, stderr: poc.stderr })
       .toEqual({ entry, code: cold.code, stdout: cold.stdout, stderr: cold.stderr });
-    if (cold.code === 0 && /^def main\b/m.test(fs.readFileSync(path.join(this.dir, entry), "utf8"))) {
+    if (cold.code === 0 && /^def main\b/m.test(fs.readFileSync(path.resolve(this.dir, entry), "utf8"))) {
       const coldOut = path.join(this.cache, "cold.js");
       const pocOut = path.join(this.cache, "poc.js");
       fs.rmSync(coldOut, { force: true });
@@ -315,6 +323,32 @@ def main() -> IO(Unit):
 `);
     expect(h.agree("F.bend")).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
     expect(h.poc(["cache", "verify"]).stdout).toContain('"quarantined":0');
+  }, 900_000);
+
+  // Another project's store, read as a layer, serves its states and
+  // artifacts without a check or a write; an edit extends the layer's prefix
+  // into the reader's own store. Keys name files by real path, so the reader
+  // checks the same files (in Nix: the same source store path).
+  test("a read-only store layer serves states and artifacts", () => {
+    const base = new History();
+    base.write("P.bend", P);
+    base.write("M.bend", M("5n"));
+    base.write("E.bend", E("layered"));
+    base.agree("E.bend");
+    const entry = path.join(base.dir, "E.bend");
+    const over = new History();
+    over.signer = base.signer;
+    over.layers = base.store();
+    expect(over.agree(entry)).not.toContain("bookCheck");
+    expect(fs.existsSync(path.join(over.store(), "objects"))).toBe(false);
+    base.write("E.bend", E("edited"));
+    expect(over.agree(entry)).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
+    expect(fs.existsSync(path.join(over.store(), "objects"))).toBe(true);
+    expect(over.poc(["cache", "verify"]).stdout).toContain('"quarantined":0');
+    // A reader with its own signer does not trust the layer's objects.
+    const stranger = new History();
+    stranger.layers = base.store();
+    expect(stranger.agree(entry)).toContain("resumePrefix miss");
   }, 900_000);
 
   test("signed states: forgeries are quarantined, untrusted signers are misses", () => {
