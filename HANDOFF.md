@@ -1,67 +1,52 @@
 # Handoff: bend-proof-of-compile
 
-## Isolated upstream integration
+## Status (2026-11-08): on upstream v2.0.40
 
-This checkout targets upstream `7a7e6505aeff2101a139a8419e16098ed2a89110`.
-Local focused validation with Bun 1.4.2 passes codec, SHA, incremental
-acceptance and direct scheduler tests, plus TypeScript checking. The latest
-counts and commands are recorded in `../validation/poc-tests.log`; Nix syntax
-parsing, Git whitespace checks and metadata-only setup checks also pass. This is not a
-release gate. The isolated POC flake now pins local Bend checkpoint
-`1b8140bfea9023a5d2bd35164e1654df5f4e8822` (2.0.39), including the
-explicit unsafe-checking extension. This machine-local pin is not publishable.
-The coordinated local bump is complete: categories checkpoint
-`f4eb08fb797ab1bf4b4500f724ff0023acc76f1c` pins POC
-`0a40fcaedd542439035011917a8108b7cc1b14b2` and the same Bend revision.
-Both flakes expose the same rebuilt POC package. Categories full-flake/corpus
-validation has not run; its tooling still needs migration. Historical
-performance/corpus results below are not new-target measurements.
+poc runs on the fork's published series `poc/2.0.40` (tag
+`poc/2.0.40+poc.1`, `5158ac74`; `bend version` prints `2.0.40+poc.1`),
+pinned by revision in `flake.nix`; the version string is read from the
+pinned source. This branch is `bend-2.0.40` on GitHub. `nix build
+.#proof-of-compile` passes: 35 tests (codec, stored bodies, runtime, SHA,
+acceptance histories against the fork's CLI) and the install check.
 
-The rebuilt POC Nix package includes the unsafe-checking extension and passes
-build and install checks:
-`/nix/store/dzxyrpqy5x3hipdrnlxfxzwn1q8x6cnv-proof-of-compile-0.1.0`.
-Its suite passes 26 tests with one Node-dependent skip (954 assertions). Install
-checks cover prefix/artifact restoration, later law fills, cache trust and cold
-versus installed unsafe-mode reports followed by strict restored rejection. See
-`../validation/poc-nix-bumped-build.log`; categories resolves that same output in
-`../validation/categories-poc-bumped-build.log`. This validates macOS packaging,
-not Linux sandbox purity (the host sandbox is disabled). The local suite passes
-all 27 tests (955 assertions), including Node, and TypeScript checking passes.
-The older `poc-nix-build.log` and `package-locks.{before,after}` predate the
-coordinated local pin changes and are historical evidence, not current lock hashes.
+- **Stored bodies (pack schema 5).** `src/body-codec.ts` stores each checked
+  body with its share and annotation cells lowered at their binder depth and
+  raised under an environment of the enclosing levels, so restored states
+  compile directly: `emitRestored` no longer replays, and `prepare_book` and
+  `book_valid(…, only)` are no longer used. `test/body-codec.test.ts` checks
+  byte-identical C and JS over six programs (Base's bodies included) and that
+  the encoding is stable after one round trip (the kernel's raise reduces
+  redexes in cell values, so the first round may store a reduced, equal form).
+- **Constructor datatypes.** Packs keep `Ctr.f` (2.0.40, bendlang/bend
+  #2053); without it a type error over a restored prefix crashed in
+  rendering (`k.includes` on an undefined name).
+- **Verdict.** Bend's `book_report`: strict by default, `--allow-unsafe` for
+  audited contraction. A `Fail` report carries `own` (a reliant def is the
+  entry's own or a law).
+- The `bend-categories` input is gone; bend-categories follows this flake's
+  compiler pin instead.
 
-Focused categories POC smoke matches cold checking for `PROOF.bend` and
-`tests/Smoke.bend`, including shared-prefix reuse. An unsafe contraction fixture
-also matches cold rejection, exposing the conflict with categories' legacy
-D004 acceptance policy; see `../validation/categories-poc-{smoke,unsafe}.json`.
-Explicit unsafe checking now preserves categories' audited contraction support:
-`poc check --allow-unsafe FILE` agrees with cold
-`bend FILE --check-only --allow-unsafe`. Module checks accept `--module` in either
-order. Bend owns both reports: this mode prints `ALL TERMS CHECK`, warns that it
-is not an assumption-free proof verdict and lists unsafe dependencies. Default
-checking remains strict; foreign dependencies, open laws and type errors still
-fail. `--allow-unsafe` is incompatible with `--verdict` on the cold CLI.
-The real `src/Categories/Category_Unsafe.bend` passes in permitted mode and fails
-in strict mode, with cold/POC stream equivalence and restored policy switches
-requiring no bookCheck; see `../validation/categories-poc-allow-unsafe.json`.
-The exact installed package exposed through categories also passes PROOF/Smoke
-cold equivalence and unsafe/strict restored-policy switches, with no inherited
-source/app overrides: `../validation/categories-poc-bumped-smoke.json` (reproduce
-with `python3 ../validation/check-bumped-poc.py`). Local revision pins are
-machine-specific and must be replaced before publishing.
-This is a fork-maintained CLI extension, not a changed checker judgment.
-Existing categories audit rules, verdict parsers and certification gates remain
-unmigrated. Checked-book cache publication is not proof certification: a
-structurally checked book may be cached even when its proof report rejects unsafe
-reliance. Strict and permitted reports use the same checked-state cache identity;
-policy changes the report, not the checked state.
+### Per-release procedure for the fork series
 
-The emitted `dist/app.js` runs on Bend's scheduler, including Promise effects;
-there is no application-specific IO interpreter. Proof policy and diagnostic
-rendering delegate to Bend's exported reporter, using lazy record summaries.
-Packs and signed CAS metadata are schema 4, under `v4`; old schemas are not
-accepted. Native-only IO keeps its blocking poller; mixed Promise/descriptor
-waits poll descriptors at most 10ms apart, trading latency for event-loop liveness.
+For upstream release `vX` with the series on `poc/<previous>`:
+
+```sh
+git -C ~/Work/bend fetch upstream --tags
+git -C ~/Work/bend switch -c poc/X vX
+git -C ~/Work/bend cherry-pick -x <previous upstream>..poc/<previous>
+```
+
+Expect conflicts where conversion (`bend.ts`), the verdict
+(`main.ts` `book_promises`/`book_report`) and `io_run` (`comp.ts`) move. Then:
+bump `BUILD` in `main.ts`; check the caps (`gates/repo.ts`, `ttok -m
+gpt-3.5-turbo`; the fork's `comp.ts` cap is 66,600); run the fork's
+`tests/snapshot`, `tests/check/congruence_*` and a differential of every
+`tests/` file under `--check-only` against plain `vX` (on 2.0.40: 1,852 of
+1,852 identical); push `poc/X` and tag `poc/X+poc.1`; re-pin this flake;
+`nix build .#proof-of-compile`; then bump bend-categories' `bend-poc`.
+
+The series' `prepare_book` and replay commits are no longer used by poc and
+can leave the series at the next rebase.
 
 ## Pre-integration milestone history
 
