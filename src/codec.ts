@@ -18,6 +18,12 @@ import { decodeBody, encodeBody, type WireBody } from "./body-codec.ts";
 import { PocError } from "./error.ts";
 
 const PACK_SCHEMA = 5;
+// Stored bodies are bounded: a generated proof's elaboration can lower to
+// millions of nodes (one bend-categories body: 3.7 M; one module: 55 M), far
+// more than re-elaborating it costs, and a pack is one JSON text. A body over
+// either budget is not stored; a build that reaches it re-elaborates it.
+const BODY_NODES_PER_DEFINITION = 200_000;
+const BODY_NODES_PER_PACK = 1_500_000;
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
 
@@ -202,6 +208,7 @@ export function encodePackWire(
   try {
     const book = child.book;
     const names = Object.keys(book.tlds).sort();
+    const budget = { nodes: BODY_NODES_PER_PACK };
     // Records hold lowered terms; one stringify pass writes them, turning each
     // span into a reference to its interned source text.
     const tlds = names.map((name) => {
@@ -209,7 +216,7 @@ export function encodePackWire(
       if (tld === undefined) {
         throw new PocError("CODEC", `book.tlds.${name} is missing`);
       }
-      return [name, encodeTopLevel(runtime, tld, (term) => runtime.Bend.term_lower(term))] as const;
+      return [name, encodeTopLevel(runtime, tld, (term) => runtime.Bend.term_lower(term), budget)] as const;
     });
     const sources: SourceFileLike[] = [];
     const sourceIds = new Map<string, number>();
@@ -282,7 +289,7 @@ export function encodePackWire(
     if (cause instanceof PocError) {
       throw cause;
     }
-    throw new PocError("CODEC", "could not encode a checked Bend pack", {}, { cause });
+    throw new PocError("CODEC", `could not encode a checked Bend pack: ${cause instanceof Error ? cause.message : String(cause)}`, {}, { cause });
   }
 }
 
@@ -518,6 +525,7 @@ function encodeTopLevel(
   runtime: CompilerRuntime,
   tld: TopLevelLike,
   lower: (term: Parameters<CompilerRuntime["Bend"]["term_lower"]>[0]) => PlainTerm,
+  budget: { nodes: number },
 ): WireTopLevel<PlainTerm> {
   const r = referencesOf(runtime, tld);
   if (tld.$ === "ADT") {
@@ -547,8 +555,20 @@ function encodeTopLevel(
     ...(tld.u === undefined ? {} : { u: tld.u }),
     ...(tld.l === undefined ? {} : { l: tld.l }),
     ...(tld.i === undefined ? {} : { i: tld.i.map(pathReal) }),
-    ...(tld.e === undefined ? {} : { e: encodeBody(runtime.Bend, tld.e) }),
+    ...storedBody(runtime, tld.e, budget),
   };
+}
+
+function storedBody(runtime: CompilerRuntime, body: unknown, budget: { nodes: number }): { e?: WireBody } {
+  if (body === undefined || budget.nodes <= 0) {
+    return {};
+  }
+  const wire = encodeBody(runtime.Bend, body, Math.min(BODY_NODES_PER_DEFINITION, budget.nodes));
+  if (wire === undefined) {
+    return {};
+  }
+  budget.nodes -= wire.n.length;
+  return { e: wire };
 }
 
 // A path as the checker's CLI resolves it (main.ts path_real): its realpath

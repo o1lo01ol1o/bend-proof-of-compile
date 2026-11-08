@@ -76,7 +76,14 @@ const isReference = (value: unknown): value is { readonly "@": number } =>
   typeof value === "object" && value !== null && !Array.isArray(value) &&
   Object.keys(value).length === 1 && typeof (value as { "@"?: unknown })["@"] === "number";
 
-export function encodeBody(kernel: BodyKernel, body: unknown): WireBody {
+// Both directions walk with explicit work lists, never the machine stack: a
+// generated proof's body can be tens of thousands of nodes deep.
+
+// `limit` bounds the stored nodes; a body that would exceed it is not
+// encoded (undefined), and compilation re-elaborates it instead.
+export function encodeBody(kernel: BodyKernel, body: unknown): WireBody;
+export function encodeBody(kernel: BodyKernel, body: unknown, limit: number): WireBody | undefined;
+export function encodeBody(kernel: BodyKernel, body: unknown, limit = Infinity): WireBody | undefined {
   const ids = new Map<object, number>();
   const nodes: unknown[] = [];
   const leaves = new Map<string, number>();
@@ -93,6 +100,10 @@ export function encodeBody(kernel: BodyKernel, body: unknown): WireBody {
     }
     return `${file}:${s.beg}:${s.end}`;
   };
+  // A leaf (a node whose fields are all primitives, its span aside) keeps
+  // its object identity through the kernel's lowering and gets a fresh one
+  // from its raise, so leaves are shared by content: the encoding of a
+  // restored body is then the encoding of the checked one.
   const leafKey = (node: Node): string | undefined => {
     const parts: string[] = [];
     for (const field in node) {
@@ -122,7 +133,10 @@ export function encodeBody(kernel: BodyKernel, body: unknown): WireBody {
     }
     return low;
   };
-  const go = (value: unknown, depth: number): unknown => {
+  const work: Array<{ readonly value: object; readonly depth: number; readonly id: number }> = [];
+  // The wire form of a child: inline when primitive, else a reference to its
+  // node, whose fields are filled when its turn on the work list comes.
+  const ref = (value: unknown, depth: number): unknown => {
     if (typeof value === "function") {
       throw new Error("a checked body holds a closure outside a share or annotation cell");
     }
@@ -136,10 +150,6 @@ export function encodeBody(kernel: BodyKernel, body: unknown): WireBody {
     if (known !== undefined) {
       return { "@": known };
     }
-    // A leaf (a node whose fields are all primitives, its span aside) keeps
-    // its object identity through the kernel's lowering and gets a fresh one
-    // from its raise, so leaves are shared by content: the encoding of a
-    // restored body is then the encoding of the checked one.
     const leaf = Array.isArray(value) ? undefined : leafKey(value as Node);
     if (leaf !== undefined) {
       const same = leaves.get(leaf);
@@ -149,44 +159,76 @@ export function encodeBody(kernel: BodyKernel, body: unknown): WireBody {
       }
     }
     const id = nodes.length;
-    if (leaf !== undefined) {
-      leaves.set(leaf, id);
+    if (id >= limit) {
+      throw OVER_LIMIT;
     }
     ids.set(value, id);
     nodes.push(null);
+    if (leaf !== undefined) {
+      leaves.set(leaf, id);
+    }
+    work.push({ value, depth, id });
+    return { "@": id };
+  };
+  try {
+    const root = ref(body, 0);
+    if (!isReference(root)) {
+      throw new Error("a checked body is not a term");
+    }
+    fill();
+    return { n: nodes, r: root["@"] };
+  } catch (error) {
+    if (error === OVER_LIMIT) {
+      return undefined;
+    }
+    throw error;
+  }
+  function fill(): void {
+  for (let task = work.pop(); task !== undefined; task = work.pop()) {
+    const { value, depth, id } = task;
     if (Array.isArray(value)) {
-      nodes[id] = value.map((item) => go(item, depth));
-      return { "@": id };
+      nodes[id] = value.map((item) => ref(item, depth));
+      continue;
     }
     const node = value as Node;
     if (node.$ === "Var" && typeof node.v === "object" && node.v !== null) {
-      nodes[id] = { $: "Var", k: node.k, i: node.i, s: node.s, L: go(lower(node.v, depth), depth) };
-      return { "@": id };
+      nodes[id] = { $: "Var", k: node.k, i: node.i, s: node.s, L: ref(lower(node.v, depth), depth) };
+      continue;
     }
     const under = BODY_FIELD[String(node.$)];
     const inner = under === undefined ? depth : depthUnder(node, depth);
     const out: Node = {};
     for (const field in node) {
       // A span is written by the pack's source table, not as a node.
-      out[field] = field === "s" ? node[field] : go(node[field], field === under ? inner : depth);
+      out[field] = field === "s" ? node[field] : ref(node[field], field === under ? inner : depth);
     }
     nodes[id] = out;
-    return { "@": id };
-  };
-  const root = go(body, 0);
-  if (!isReference(root)) {
-    throw new Error("a checked body is not a term");
   }
-  return { n: nodes, r: root["@"] };
+  }
 }
+
+const OVER_LIMIT = Symbol("the body exceeds its node limit");
+
+// The binders around a node, innermost first, shared between siblings.
+type Scope = { readonly k: string; readonly i: number; readonly depth: number; readonly up: Scope } | null;
+
+const scopeDepth = (scope: Scope): number => scope?.depth ?? 0;
 
 // `wire` has been through the pack's restore (spans and interned names).
 export function decodeBody(kernel: BodyKernel, wire: WireBody): unknown {
   const made: unknown[] = new Array(wire.n.length);
-  // Cells that shared one value in the checker share one raised value here,
-  // so encoding a restored body writes the same DAG (decode∘encode = id).
+  // Cells that shared one value in the checker share one raised value here.
   const raised = new Map<string, unknown>();
-  const go = (value: unknown, binders: readonly Binder[]): unknown => {
+  const cells: Array<{ readonly cell: Node; readonly low: unknown; readonly key: string | undefined; readonly scope: Scope }> = [];
+  const work: Array<{ readonly id: number; readonly scope: Scope }> = [];
+  const node = (id: number): unknown => {
+    const raw = wire.n[id];
+    if (raw === undefined) {
+      throw new Error(`a stored body refers to node ${id}, which it does not hold`);
+    }
+    return raw;
+  };
+  const get = (value: unknown, scope: Scope): unknown => {
     if (Array.isArray(value)) {
       return [...value];
     }
@@ -197,58 +239,96 @@ export function decodeBody(kernel: BodyKernel, wire: WireBody): unknown {
     if (made[id] !== undefined) {
       return made[id];
     }
-    const node = wire.n[id];
-    if (node === undefined) {
-      throw new Error(`a stored body refers to node ${id}, which it does not hold`);
-    }
-    if (Array.isArray(node)) {
-      const array: unknown[] = [];
-      made[id] = array;
-      for (const item of node) {
-        array.push(go(item, binders));
-      }
-      return array;
-    }
-    const raw = node as Node;
-    if (raw.$ === "Var" && "L" in raw) {
-      const cell = kernel.Var(String(raw.k), Number(raw.i), raw.s, undefined) as Node;
-      made[id] = cell;
-      // One checker value lowers to one stored node per depth; its free levels
-      // are bound by the same binders wherever it is shared.
-      const depth = Math.max(0, ...binders.map(([, i]) => i + 1));
-      const key = isReference(raw.L) ? `${raw.L["@"]}@${depth}` : undefined;
-      const known = key === undefined ? undefined : raised.get(key);
-      if (known !== undefined) {
-        cell.v = known;
-        return cell;
-      }
-      let env: unknown = null;
-      for (const [k, i] of binders) {
-        env = kernel.list_set(env, i, kernel.Var(k, i));
-      }
-      cell.v = kernel.term_higher(go(raw.L, binders), env);
-      if (key !== undefined) {
-        raised.set(key, cell.v);
-      }
-      return cell;
-    }
-    const out: Node = {};
-    made[id] = out;
-    const under = BODY_FIELD[String(raw.$)];
-    // Fields keep their stored order; the binding field is filled last,
-    // once the binders it sits under are known.
-    for (const field in raw) {
-      out[field] = undefined;
-    }
-    for (const field in raw) {
-      if (field !== under) {
-        out[field] = go(raw[field], binders);
-      }
-    }
-    if (under !== undefined && under in raw) {
-      out[under] = go(raw[under], [...binders, ...binds(out)]);
-    }
-    return out;
+    const raw = node(id);
+    const shell = Array.isArray(raw) ? [] : (raw as Node).$ === "Var" && "L" in (raw as Node)
+      ? kernel.Var(String((raw as Node).k), Number((raw as Node).i), (raw as Node).s, undefined)
+      : {};
+    made[id] = shell;
+    work.push({ id, scope });
+    return shell;
   };
-  return go({ "@": wire.r }, []);
+  // A pattern's levels, read off the wire (its nodes may not be built yet).
+  const wireLevels = (value: unknown): number[] => {
+    const levels: number[] = [];
+    for (const todo = [value]; todo.length > 0;) {
+      const item = todo.pop();
+      const raw = (isReference(item) ? node(item["@"]) : item) as Node | unknown[] | null;
+      if (Array.isArray(raw)) {
+        todo.push(...raw);
+      } else if (raw?.$ === "PVar" && typeof raw.i === "number") {
+        levels.push(raw.i);
+      } else if (raw?.$ === "PCtr") {
+        todo.push(raw.x);
+      }
+    }
+    return levels;
+  };
+  const extend = (raw: Node, scope: Scope): Scope => {
+    let binders: Binder[];
+    switch (raw.$) {
+      case "Lam":
+      case "All":
+        binders = [[String(raw.k), Number(raw.i)]];
+        break;
+      case "Let":
+        binders = (raw.k as string[]).map((k, j) => [k, (raw.i as number[])[j] as number] as const);
+        break;
+      case "Sub":
+        binders = [["_", Number(raw.i)], ...wireLevels(raw.v).map((i) => ["_", i] as const)];
+        break;
+      default:
+        binders = [];
+    }
+    for (const [k, i] of binders) {
+      scope = { k, i, depth: Math.max(scopeDepth(scope), i + 1), up: scope };
+    }
+    return scope;
+  };
+  const root = get({ "@": wire.r }, null);
+  for (let task = work.pop(); task !== undefined; task = work.pop()) {
+    const { id, scope } = task;
+    const raw = node(id);
+    const out = made[id] as Node & unknown[];
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        out.push(get(item, scope));
+      }
+      continue;
+    }
+    const fields = raw as Node;
+    if (fields.$ === "Var" && "L" in fields) {
+      const key = isReference(fields.L) ? `${fields.L["@"]}@${scopeDepth(scope)}` : undefined;
+      cells.push({ cell: out, low: get(fields.L, scope), key, scope });
+      continue;
+    }
+    const under = BODY_FIELD[String(fields.$)];
+    // Fields keep their stored order.
+    for (const field in fields) {
+      out[field] = field === under
+        ? get(fields[field], extend(fields, scope))
+        : field === "s" ? fields[field] : get(fields[field], scope);
+    }
+  }
+  // Raise each cell's value once every stored node is built: a free level i
+  // becomes the variable its enclosing binder makes.
+  for (const { cell, low, key, scope } of cells) {
+    const known = key === undefined ? undefined : raised.get(key);
+    if (known !== undefined) {
+      cell.v = known;
+      continue;
+    }
+    let env: unknown = null;
+    const seen = new Set<number>();
+    for (let at = scope; at !== null; at = at.up) {
+      if (!seen.has(at.i)) {
+        seen.add(at.i);
+        env = kernel.list_set(env, at.i, kernel.Var(at.k, at.i));
+      }
+    }
+    cell.v = kernel.term_higher(low, env);
+    if (key !== undefined) {
+      raised.set(key, cell.v);
+    }
+  }
+  return root;
 }

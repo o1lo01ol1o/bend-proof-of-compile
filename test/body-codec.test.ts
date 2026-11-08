@@ -87,3 +87,46 @@ describe("stored bodies", () => {
     expect(bodies).toBeGreaterThan(300);
   });
 });
+
+// A body over the codec's budget is not stored, and a build re-elaborates the
+// reachable ones by a replay. Whatever mix of stored and missing bodies a
+// restored state holds, it compiles to the checked program. The states here
+// are real packs (Base, then the program) with bodies removed from the wire,
+// as the budget removes them.
+describe("bodies not stored", async () => {
+  const { loadCompiler } = await import("../src/compiler.ts");
+  const { decodePackWire, encodePackWire } = await import("../src/codec.ts");
+  const runtime = await loadCompiler(source);
+  const entry = path.join(fixtures, "PolyRec.bend");
+  const order = await runtime.loadSteps(entry, "entry");
+  const groups = [...order.imports, order.entry].map((step, index) => ({ steps: [step], key: String(index).padStart(64, "0") }));
+  const wires: string[] = [];
+  await runtime.check(order.entry.path, "", groups, undefined, (_key, parent, child, last) => {
+    wires.push(encodePackWire(runtime, null, parent, child, last));
+  });
+  const book = await checked(entry);
+  const c = Comp.compile_book(book);
+  const js = Comp.js_book(book);
+  for (const [label, keep] of [
+    ["none stored", (_: number) => false],
+    ["every other one stored", (index: number) => index % 2 === 0],
+  ] as const) {
+    test(`${label}: C and JS equal the checked program's`, () => {
+      let index = 0;
+      let state = { book: runtime.Bend.book_nil(), seen: new Map<string, string | null>() };
+      for (const wire of wires) {
+        const pack = JSON.parse(wire) as { tlds: Array<[string, { e?: unknown }]> };
+        for (const [, record] of pack.tlds) {
+          if (record.e !== undefined && !keep(index++)) {
+            delete record.e;
+          }
+        }
+        const child = { book: runtime.Main.book_over(state.book), seen: new Map(state.seen) };
+        decodePackWire(runtime, JSON.stringify(pack)).apply(child);
+        state = child;
+      }
+      expect(runtime.emitRestored(state, "c")).toBe(c);
+      expect(runtime.emitRestored(state, "js")).toBe(js);
+    }, 120_000);
+  }
+});
