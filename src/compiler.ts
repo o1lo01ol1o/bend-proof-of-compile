@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { namesOf, summaryOf } from "./codec.ts";
+import { summaryOf } from "./codec.ts";
 import { PocError } from "./error.ts";
 
 export type Namespace = string | null;
@@ -85,7 +85,7 @@ interface BendModule {
     root?: string,
     on?: LoadHook,
   ): Promise<number>;
-  book_valid(book: BookLike, done: number, only?: Set<string>): void;
+  book_valid(book: BookLike, done: number): void;
   term_lower(term: HigherTerm, depth?: number): PlainTerm;
   term_higher(term: PlainTerm, env?: unknown): HigherTerm;
   Var(k: string, i: number, s?: unknown, v?: unknown): unknown;
@@ -123,7 +123,6 @@ interface CompModule {
   js_book(book: BookLike): string;
   js_lib(book: BookLike, mod?: boolean): string;
   io_type(book: BookLike): HigherTerm | null;
-  prepare_book(book: BookLike, target: Target): BookLike;
 }
 
 // One file of the checker's load order: its realpath, its namespace, and the
@@ -210,11 +209,9 @@ export interface CompilerRuntime {
   // definitions that rely on @unsafe or foreign code. `n0` is retained as
   // the entry boundary, but upstream's verdict covers the entire book.
   verdict(state: BookStateLike, n0: number): Verdict;
-  // The artifact of a state whose records were restored from packs: stored
-  // bodies are used as they are; a reachable body that was not stored is
-  // re-elaborated by a replay.
-  emitRestored(state: BookStateLike, target: Target): string;
-  // The artifact of a state checked in this process from nothing.
+  // The artifact of a state, checked in this process or restored from packs:
+  // a restored definition's body is its stored elaboration, so nothing is
+  // re-elaborated.
   emit(book: BookLike, target: Target): string;
   compileLibrary(book: BookLike, roots?: readonly string[]): string;
   formatError(error: unknown): string;
@@ -255,7 +252,6 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     typeof Main.book_err !== "function" ||
     typeof Comp.compile_book !== "function" ||
     typeof Comp.js_book !== "function" ||
-    typeof Comp.prepare_book !== "function" ||
     typeof Comp.js_lib !== "function" ||
     typeof Comp.io_type !== "function" ||
     typeof Bend.name_key !== "function" ||
@@ -285,82 +281,6 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
   // stored observations so reporting never raises restored terms.
   const report = (book: BookLike, policy: "proof" | "allow-unsafe" = "proof"): BookReport =>
     Main.book_report(book, (name) => summaryOf(runtime, book.tlds, name), policy);
-
-  // Compilation after restore. Packs store a definition's checked body when
-  // it fits the budget (src/codec.ts), so most restored records compile as
-  // they are. A definition `main` reaches whose body was not stored is
-  // re-elaborated by replaying the order with only it (and the callers of any
-  // template instance among them, which mint the instance at the view a cold
-  // check does) checked; every other record keeps its stored body.
-  const replay = (book: BookLike): BookLike => {
-    const instances = new Set(Object.values(book.tmps).flatMap((table) => [...table.values()]));
-    const refs = (name: string): readonly string[] => summaryOf(runtime, book.tlds, name)?.refs ?? [];
-    const reach = new Set<string>();
-    for (const queue = ["main"]; queue.length > 0;) {
-      const name = queue.pop() as string;
-      if (!reach.has(name)) {
-        reach.add(name);
-        queue.push(...refs(name));
-      }
-    }
-    const missing = (name: string): boolean => {
-      const tld = book.tlds[name];
-      return tld?.$ === "Def" && tld.v !== null && tld.e === undefined;
-    };
-    const only = new Set([...reach].filter(missing));
-    if (only.size === 0) {
-      return book;
-    }
-    const callers = new Map<string, string[]>();
-    for (const name of namesOf(book.tlds)) {
-      for (const reference of refs(name)) {
-        const list = callers.get(reference) ?? [];
-        list.push(name);
-        callers.set(reference, list);
-      }
-    }
-    for (const queue = [...only]; queue.length > 0;) {
-      const name = queue.pop() as string;
-      if (instances.has(name)) {
-        for (const caller of callers.get(name) ?? []) {
-          if (!only.has(caller)) {
-            only.add(caller);
-            queue.push(caller);
-          }
-        }
-      }
-    }
-    // Re-elaboration writes e, so the replay owns copies of the records;
-    // checked snapshot records stay immutable.
-    const base = Object.create(null) as BookLike["tlds"];
-    for (const name of instances) {
-      const tld = book.tlds[name];
-      if (tld !== undefined) {
-        base[name] = { ...tld };
-      }
-    }
-    const events = Object.create(base) as BookLike["tlds"];
-    for (const name of new Set(book.order)) {
-      const tld = book.tlds[name];
-      if (tld === undefined) {
-        throw new PocError("CODEC", `the restored state has no record for ${name}`);
-      }
-      events[name] = base[name] ?? { ...tld };
-    }
-    const tmps = Object.create(null) as BookLike["tmps"];
-    for (const [name, table] of Object.entries(book.tmps)) {
-      tmps[name] = new Map(table);
-    }
-    const again: BookLike = {
-      tlds: events,
-      ctrs: Object.create(null) as BookLike["ctrs"],
-      order: [...book.order],
-      hols: 0,
-      tmps,
-    };
-    Bend.book_valid(again, 0, only);
-    return Main.book_flat(again);
-  };
 
   const runtime: CompilerRuntime = {
     bend2Source: source,
@@ -489,16 +409,6 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
         unsafeReport: report(state.book, "allow-unsafe"),
         reliant: result.$ === "Fail" ? result.reliant : [],
       };
-    },
-    emitRestored(state, target) {
-      try {
-        // Bend's output wrapper adds runtime dependencies the user main's
-        // summary does not name, so reachability is the prepared program's.
-        const prepared = Comp.prepare_book(Main.book_flat(state.book), target);
-        return emit(replay(prepared), target);
-      } catch (cause) {
-        throw rejected(cause, { target });
-      }
     },
     emit(book, target) {
       return emit(Main.book_flat(book), target);

@@ -51,7 +51,7 @@ describe("packs", async () => {
   test("golden vectors pin the wire text", () => {
     expect(sealed.length).toBe(2);
     for (const [index, pack] of sealed.entries()) {
-      const file = path.join(golden, `pack-v5-${index}.json`);
+      const file = path.join(golden, `pack-v6-${index}.json`);
       if (process.env.POC_UPDATE_GOLDEN === "1") {
         fs.writeFileSync(file, `${abstract(pack.wire)}\n`);
       }
@@ -78,7 +78,7 @@ describe("packs", async () => {
   test("decode then encode is the identity on each golden pack", () => {
     let parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     for (let index = 0; index < sealed.length; index += 1) {
-      const text = concrete(fs.readFileSync(path.join(golden, `pack-v5-${index}.json`), "utf8").trimEnd());
+      const text = concrete(fs.readFileSync(path.join(golden, `pack-v6-${index}.json`), "utf8").trimEnd());
       const pack = decodePackWire(runtime, text);
       const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map(parent.seen) };
       pack.apply(child);
@@ -189,8 +189,20 @@ describe("packs", async () => {
       expect(() => decodePackWire(runtime, JSON.stringify(changed))).toThrow();
     };
     reject({ ...wire, schema: 2 });
-    reject({ ...wire, schema: 3 });
+    reject({ ...wire, schema: 5 });
     reject({ ...wire, ctrs: [] });
+    // A definition with a value has a body; a declaration has none.
+    const tlds = wire.tlds as Array<[string, Record<string, unknown>]>;
+    const valued = tlds.findIndex(([, record]) => record.$ === "Def" && record.v !== null);
+    const declared = tlds.findIndex(([, record]) => record.$ === "Def" && record.v === null);
+    expect(valued).toBeGreaterThanOrEqual(0);
+    expect(declared).toBeGreaterThanOrEqual(0);
+    const without = (index: number, change: (record: Record<string, unknown>) => Record<string, unknown>) =>
+      tlds.map(([name, record], at) => [name, at === index ? change(record) : record]);
+    const bodyless = decodePackWire(runtime, JSON.stringify({ ...wire, tlds: without(valued, ({ e: _e, ...rest }) => rest) }));
+    expect(() => bodyless.force()).toThrow();
+    const declaredWithBody = decodePackWire(runtime, JSON.stringify({ ...wire, tlds: without(declared, (record) => ({ ...record, e: 0 })) }));
+    expect(() => declaredWithBody.force()).toThrow();
     reject({ ...wire, last: -1 });
     reject({ ...wire, tlds: [...(wire.tlds as unknown[]), ...(wire.tlds as unknown[])] });
     expect(() => decodePackWire(runtime, "{")).toThrow();

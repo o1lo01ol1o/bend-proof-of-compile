@@ -14,28 +14,24 @@ import type {
   SpanLike,
   TopLevelLike,
 } from "./compiler.ts";
-import { decodeBody, encodeBody, type WireBody } from "./body-codec.ts";
+import { StoredTerms, TermTable } from "./term-table.ts";
 import { PocError } from "./error.ts";
 
-const PACK_SCHEMA = 5;
-// Stored bodies are bounded: a generated proof's elaboration can lower to
-// millions of nodes (one bend-categories body: 3.7 M; one module: 55 M), far
-// more than re-elaborating it costs, and a pack is one JSON text. A body over
-// either budget is not stored; a build that reaches it re-elaborates it.
-const BODY_NODES_PER_DEFINITION = 200_000;
-const BODY_NODES_PER_PACK = 1_500_000;
+const PACK_SCHEMA = 6;
+
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
 
 type WireSpan = { readonly $span: readonly [number, number, number] };
 type WireValue = null | boolean | number | string | WireValue[] | { [key: string]: WireValue };
 
-// A stored record. A definition's checked body (`e`) is stored by the body
-// codec (src/body-codec.ts), which keeps checker levels as variables, so a
-// restored state compiles without re-elaborating. `r` is the report's
-// summary: the names the record's types and elaboration refer to. `Term` is a lowered
-// term: the encoder builds records of the checker's lowered terms, whose spans
-// the one stringify pass writes as `WireSpan`s.
+// A stored record. A definition with a value has a checked body (`e`): the
+// root of its elaboration in the pack's term table (src/term-table.ts), which
+// keeps checker levels as variables, so a restored state compiles without
+// re-elaborating anything. `r` is the report's summary: the names the
+// record's types and elaboration refer to. `Term` is a lowered term: the
+// encoder builds records of the checker's lowered terms, whose spans the one
+// stringify pass writes as `WireSpan`s.
 interface WireAdt<Term> {
   readonly $: "ADT";
   readonly n: number;
@@ -57,7 +53,7 @@ interface WireDefinition<Term> {
   readonly u?: boolean;
   readonly l?: boolean;
   readonly i?: readonly string[];
-  readonly e?: WireBody;
+  readonly e?: number;
 }
 
 interface WireConstructor<Term> {
@@ -82,6 +78,9 @@ interface WirePack {
   readonly parent: string | null;
   readonly last: number;
   readonly sources: readonly SourceFileLike[];
+  // The pack's term table: every node of every stored body, and of every
+  // cell value lowered at its depth, once per content (src/term-table.ts).
+  readonly nodes: readonly WireValue[];
   readonly tlds: readonly (readonly [string, WireTopLevel<WireValue>])[];
   readonly ctrs: readonly string[];
   readonly order: readonly string[];
@@ -90,9 +89,10 @@ interface WirePack {
   readonly seen: readonly (readonly [string, string | null])[];
 }
 
-// The reference summaries of restored records, whose elaborations are gone.
-// A record the checker creates (a fill's copy included) is a new object, so
-// it is never found here and its summary is computed from its own terms.
+// The reference summaries of restored records, read without raising their
+// terms. A record the checker creates (a fill's copy included) is a new
+// object, so it is never found here and its summary is computed from its own
+// terms.
 const summaries = new WeakMap<TopLevelLike, readonly string[]>();
 
 // The names a record's types and elaboration refer to, as the checker's
@@ -208,7 +208,7 @@ export function encodePackWire(
   try {
     const book = child.book;
     const names = Object.keys(book.tlds).sort();
-    const budget = { nodes: BODY_NODES_PER_PACK };
+    const table = new TermTable(runtime.Bend);
     // Records hold lowered terms; one stringify pass writes them, turning each
     // span into a reference to its interned source text.
     const tlds = names.map((name) => {
@@ -216,7 +216,7 @@ export function encodePackWire(
       if (tld === undefined) {
         throw new PocError("CODEC", `book.tlds.${name} is missing`);
       }
-      return [name, encodeTopLevel(runtime, tld, (term) => runtime.Bend.term_lower(term), budget)] as const;
+      return [name, encodeTopLevel(runtime, tld, (term) => runtime.Bend.term_lower(term), table)] as const;
     });
     const sources: SourceFileLike[] = [];
     const sourceIds = new Map<string, number>();
@@ -224,7 +224,7 @@ export function encodePackWire(
     // without repeatedly serializing the full file for every span; equal but
     // distinct files still share the canonical content-based source table.
     const sourceObjects = new WeakMap<SourceFileLike, number>();
-    const records = JSON.stringify(tlds, function (this: unknown, _key: string, value: unknown): unknown {
+    const replacer = function (this: unknown, _key: string, value: unknown): unknown {
       if (typeof value === "number" && !Number.isFinite(value)) {
         throw new PocError("CODEC", "term contains a non-finite number", { value });
       }
@@ -254,7 +254,9 @@ export function encodePackWire(
         return { $span: [sourceId, value.beg, value.end] } satisfies WireSpan;
       }
       return value;
-    });
+    };
+    const records = JSON.stringify(tlds, replacer);
+    const nodeText = JSON.stringify(table.nodes, replacer);
     const done = parent.book.order.length;
     if (
       book.order.length < done ||
@@ -283,8 +285,8 @@ export function encodePackWire(
       hols: book.hols,
       tmps,
       seen: [...child.seen.entries()].filter(([file]) => !parent.seen.has(file)).sort(byName),
-    } satisfies Omit<WirePack, "schema" | "parent" | "last" | "sources" | "tlds">);
-    return `${head.slice(0, -1)},"sources":${JSON.stringify(sources)},"tlds":${records},${tail.slice(1)}`;
+    } satisfies Omit<WirePack, "schema" | "parent" | "last" | "sources" | "nodes" | "tlds">);
+    return `${head.slice(0, -1)},"sources":${JSON.stringify(sources)},"nodes":${nodeText},"tlds":${records},${tail.slice(1)}`;
   } catch (cause) {
     if (cause instanceof PocError) {
       throw cause;
@@ -364,6 +366,14 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
           [key, string(item, `${location}.al.${key}`)])),
       };
     });
+    // The term table is restored (interned names) when a body first needs
+    // it, and shared by every body of the pack.
+    const nodes = array(root.nodes, "pack.nodes");
+    let storedTerms: StoredTerms | undefined;
+    const stored = (): StoredTerms => {
+      storedTerms ??= new StoredTerms(runtime.Bend, nodes.map((value, index) => restoreValue(value, sources, `pack.nodes[${index}]`)));
+      return storedTerms;
+    };
 
     // Names and constructor ownership are parsed now; terms when first read.
     const tlds = new Map<
@@ -405,7 +415,7 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
         },
         raise: () => {
           if (raised === undefined) {
-            raised = decodeTopLevel(runtime, raw, sources, location);
+            raised = decodeTopLevel(runtime, raw, sources, location, stored);
           }
           return raised;
         },
@@ -525,7 +535,7 @@ function encodeTopLevel(
   runtime: CompilerRuntime,
   tld: TopLevelLike,
   lower: (term: Parameters<CompilerRuntime["Bend"]["term_lower"]>[0]) => PlainTerm,
-  budget: { nodes: number },
+  table: TermTable,
 ): WireTopLevel<PlainTerm> {
   const r = referencesOf(runtime, tld);
   if (tld.$ === "ADT") {
@@ -555,20 +565,23 @@ function encodeTopLevel(
     ...(tld.u === undefined ? {} : { u: tld.u }),
     ...(tld.l === undefined ? {} : { l: tld.l }),
     ...(tld.i === undefined ? {} : { i: tld.i.map(pathReal) }),
-    ...storedBody(runtime, tld.e, budget),
+    ...storedBody(tld, table),
   };
 }
 
-function storedBody(runtime: CompilerRuntime, body: unknown, budget: { nodes: number }): { e?: WireBody } {
-  if (body === undefined || budget.nodes <= 0) {
+// A definition with a value is checked, so it has a body; a declaration (a
+// law not yet filled, a foreign def) has none. The correlation is the wire's.
+function storedBody(tld: DefinitionLike, table: TermTable): { e?: number } {
+  if (tld.v === null) {
+    if (tld.e !== undefined) {
+      throw new PocError("CODEC", "a declaration has a checked body");
+    }
     return {};
   }
-  const wire = encodeBody(runtime.Bend, body, Math.min(BODY_NODES_PER_DEFINITION, budget.nodes));
-  if (wire === undefined) {
-    return {};
+  if (tld.e === undefined) {
+    throw new PocError("CODEC", "a definition with a value has no checked body");
   }
-  budget.nodes -= wire.n.length;
-  return { e: wire };
+  return { e: table.body(tld.e) };
 }
 
 // A path as the checker's CLI resolves it (main.ts path_real): its realpath
@@ -583,6 +596,7 @@ function decodeTopLevel(
   raw: Record<string, unknown>,
   sources: readonly SourceFileLike[],
   location: string,
+  stored: () => StoredTerms,
 ): TopLevelLike {
   const references = stringArray(raw.r, `${location}.r`);
   let result: TopLevelLike;
@@ -619,9 +633,12 @@ function decodeTopLevel(
     if (raw.i !== undefined) {
       definition.i = stringArray(raw.i, `${location}.i`);
     }
-    if (raw.e !== undefined) {
-      const body = record(restoreValue(raw.e, sources, `${location}.e`), `${location}.e`);
-      definition.e = decodeBody(runtime.Bend, { n: array(body.n, `${location}.e.n`), r: nonNegativeInteger(body.r, `${location}.e.r`) }) as PlainTerm;
+    if (definition.v === null) {
+      if (raw.e !== undefined) {
+        throw new PocError("CODEC", `a declaration has a stored body at ${location}`);
+      }
+    } else {
+      definition.e = stored().body(nonNegativeInteger(raw.e, `${location}.e`)) as PlainTerm;
     }
     result = definition;
   }

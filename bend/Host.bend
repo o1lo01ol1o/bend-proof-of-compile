@@ -176,9 +176,9 @@ def Host.output_remove(output: String) -> IO(Unit):
   import "../foreign/host.c"
   import "../foreign/host.js"
 
-# Emits the final state (a state with restored records, which carry no
-# elaborations, first re-elaborates what `main` reaches) and stores the
-# artifact with the build's report.
+# Emits the final state (a restored definition's body is its stored
+# elaboration, so nothing is re-elaborated) and stores the artifact with the
+# build's report.
 def Host.artifact_build(
   cache: String,
   key: String,

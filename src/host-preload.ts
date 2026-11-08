@@ -49,15 +49,13 @@ interface ResumeCandidate {
 }
 
 // A restored or checked state, with what its packs need (the key it is
-// stored under and the foreign files its chain names), `n0`, where its last
-// file's claims begin, and whether every record carries its elaboration:
-// only a state checked from nothing in this process does, and only such a
-// state is emitted directly.
+// stored under and the foreign files its chain names) and `n0`, where its
+// last file's claims begin. Every record carries its elaboration, restored
+// or checked here, so either state is emitted directly.
 interface HeldState extends BookStateLike {
   readonly key: string;
   readonly foreigns: readonly string[];
   readonly n0: number;
-  readonly elaborations: "complete" | "restored";
 }
 
 interface StateStage {
@@ -220,7 +218,6 @@ globalThis.POC_HOST = {
       if (seed !== undefined) {
         keys.set(seed, seed);
       }
-      const elaborations = seed === undefined ? "complete" : "restored";
       const checked = await runtime.check(root, namespace, groups, seed, (key, parent, child, last) => {
         const held = keys.get(parent);
         const foreigns = mergeForeigns(held?.foreigns ?? [], ownForeigns(child));
@@ -228,7 +225,7 @@ globalThis.POC_HOST = {
           parent: held?.key ?? null,
           foreigns,
         });
-        keys.set(child, { ...child, key, foreigns, n0: last, elaborations });
+        keys.set(child, { ...child, key, foreigns, n0: last });
       });
       const state = keys.get(checked.state);
       if (state === undefined || state === seed) {
@@ -269,9 +266,7 @@ globalThis.POC_HOST = {
 
   artifactBuild(cache, key, output, target, state, reliant) {
     assertDigest(key);
-    const source = state.elaborations === "complete"
-      ? runtime.emit(state.book, target)
-      : runtime.emitRestored(state, target);
+    const source = runtime.emit(state.book, target);
     const payload = Buffer.from(source, "utf8");
     putCasObjects([{ cache, key, payload, entry: { kind: "artifact", reliant } }]);
     atomicWrite(path.resolve(output), payload);
@@ -458,7 +453,6 @@ function readState(cache: string, key: string): HeldState | null {
     key,
     foreigns: head?.record.foreigns ?? [],
     n0: headLast,
-    elaborations: "restored",
   };
 }
 

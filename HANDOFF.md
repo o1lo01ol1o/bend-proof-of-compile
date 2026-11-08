@@ -6,17 +6,29 @@ poc runs on the fork's published series `poc/2.0.40` (tag
 `poc/2.0.40+poc.1`, `5158ac74`; `bend version` prints `2.0.40+poc.1`),
 pinned by revision in `flake.nix`; the version string is read from the
 pinned source. This branch is `bend-2.0.40` on GitHub. `nix build
-.#proof-of-compile` passes: 35 tests (codec, stored bodies, runtime, SHA,
+.#proof-of-compile` passes: 37 tests (codec, stored elaborations, runtime, SHA,
 acceptance histories against the fork's CLI) and the install check.
 
-- **Stored bodies (pack schema 5).** `src/body-codec.ts` stores each checked
-  body with its share and annotation cells lowered at their binder depth and
-  raised under an environment of the enclosing levels, so restored states
-  compile directly: `emitRestored` no longer replays, and `prepare_book` and
-  `book_valid(…, only)` are no longer used. `test/body-codec.test.ts` checks
-  byte-identical C and JS over six programs (Base's bodies included) and that
-  the encoding is stable after one round trip (the kernel's raise reduces
-  redexes in cell values, so the first round may store a reduced, equal form).
+- **Stored elaborations (pack schema 6).** A pack carries one term table
+  (`src/term-table.ts`): every node of every checked body and every cell
+  value, lowered by the kernel at its binder depth, once per distinct
+  content and without spans. A definition with a value always has its body
+  (the codec refuses a pack that says otherwise), so a restored state
+  compiles with no re-elaboration: there is no replay, and `prepare_book` and
+  `book_valid(…, only)` are unused. Spans are what made elaborations big: on
+  bend-categories' `Interchange/Braided_Unsafe.bend` (1,020 bodies, 11.7 M
+  body nodes, 3.9 M cells) the table holds 484 K nodes (23.5 MB of JSON)
+  where the same content with spans is 26 M; the compiler reads no span of a
+  body or type (it keys types span-free). Cost: encoding that module takes
+  ~36 s against a 3.5–5 s check (the kernel's lowering is 3.5 s of it, the
+  table's hashing of the ~84 M lowered nodes the rest), with no memory above
+  the check's own peak; `demos/app_slash_boss_3d` encodes in 0.36 s against a
+  0.24 s check (83 K nodes, 3.8 MB), and decoding a whole module is under a
+  second. `test/term-table.test.ts` checks byte-identical C and JS over six
+  programs (Base's bodies included), the stability of the encoding after one
+  round trip (the kernel's raise reduces a redex it builds, so the first round
+  may store a reduced, equal form), and emission from a state restored
+  through real packs.
 - **Constructor datatypes.** Packs keep `Ctr.f` (2.0.40, bendlang/bend
   #2053); without it a type error over a restored prefix crashed in
   rendering (`k.includes` on an undefined name).
@@ -45,8 +57,8 @@ gpt-3.5-turbo`; the fork's `comp.ts` cap is 66,600); run the fork's
 1,852 identical); push `poc/X` and tag `poc/X+poc.1`; re-pin this flake;
 `nix build .#proof-of-compile`; then bump bend-categories' `bend-poc`.
 
-The series' `prepare_book` and replay commits are no longer used by poc and
-can leave the series at the next rebase.
+The series' `prepare_book`, `book_valid(…, only)` and replay commits are no
+longer used by poc and can leave the series at the next rebase.
 
 ## Pre-integration milestone history
 
