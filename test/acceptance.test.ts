@@ -328,7 +328,8 @@ def main() -> IO(Unit):
   // Another project's store, read as a layer, serves its states and
   // artifacts without a check or a write; an edit extends the layer's prefix
   // into the reader's own store. Keys name files by real path, so the reader
-  // checks the same files (in Nix: the same source store path).
+  // checks the same files (in Nix: the same source store path). A layer is
+  // trusted by provenance: a reader with its own signer reads it too.
   test("a read-only store layer serves states and artifacts", () => {
     const base = new History();
     base.write("P.bend", P);
@@ -345,10 +346,11 @@ def main() -> IO(Unit):
     expect(over.agree(entry)).toContain("resumePrefix rank=0 remainingGroups=1 remainingSteps=1");
     expect(fs.existsSync(path.join(over.store(), "objects"))).toBe(true);
     expect(over.poc(["cache", "verify"]).stdout).toContain('"quarantined":0');
-    // A reader with its own signer does not trust the layer's objects.
+    // Two layers, searched in order: the edited entry's state is in the second.
     const stranger = new History();
-    stranger.layers = base.store();
-    expect(stranger.agree(entry)).toContain("resumePrefix miss");
+    stranger.layers = [base.store(), over.store()].join(path.delimiter);
+    expect(stranger.agree(entry)).not.toContain("bookCheck");
+    expect(fs.existsSync(path.join(stranger.store(), "objects"))).toBe(false);
   }, 900_000);
 
   // `poc plan` prints the load order a chain of boundaries follows: one step

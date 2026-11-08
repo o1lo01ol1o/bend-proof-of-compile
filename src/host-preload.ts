@@ -547,7 +547,11 @@ function objectDirectory(cache: string, key: string): string {
 
 // Read-only store layers (POC_STORE_PATH, path-delimited): stores searched
 // after the writable one. A layer is never written, quarantined or collected;
-// a Nix store path, or a symlinkJoin of several, is one such layer.
+// a Nix store path, or a symlinkJoin of several, is one such layer. A layer's
+// objects are trusted by provenance (SPEC-persistent-artifacts.md D9): the
+// layer is a build input whose integrity its builder guarantees, so its
+// objects are read whatever key signed them, while the writable store's
+// objects are read only when a trusted key signed them.
 let memoizedLayers: readonly string[] | undefined;
 
 function storeLayers(): readonly string[] {
@@ -559,11 +563,11 @@ function storeLayers(): readonly string[] {
 }
 
 // Where an object is: the writable store first, then each layer in order.
-function locateObject(cache: string, key: string): string | null {
-  for (const store of [cache, ...storeLayers()]) {
+function locateObject(cache: string, key: string): { readonly directory: string; readonly layer: boolean } | null {
+  for (const [index, store] of [cache, ...storeLayers()].entries()) {
     const directory = objectDirectory(store, key);
     if (fs.existsSync(path.join(directory, "meta.json"))) {
-      return directory;
+      return { directory, layer: index > 0 };
     }
   }
   return null;
@@ -631,12 +635,12 @@ function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): Cas
 // (or no readable kind: a read of it by kind quarantines it).
 function objectKind(cache: string, key: string): CasKind | null {
   try {
-    const directory = locateObject(cache, key);
-    if (directory === null) {
+    const located = locateObject(cache, key);
+    if (located === null) {
       return null;
     }
     const raw = JSON.parse(
-      fs.readFileSync(path.join(directory, "meta.json"), "utf8"),
+      fs.readFileSync(path.join(located.directory, "meta.json"), "utf8"),
     ) as { kind?: unknown } | null;
     return raw?.kind === "state" || raw?.kind === "artifact" ? raw.kind : null;
   } catch {
@@ -644,20 +648,22 @@ function objectKind(cache: string, key: string): CasKind | null {
   }
 }
 
-// An object's verified metadata: null when there is none or its signer is not
-// trusted (a miss, left in place); an error when it is malformed or its
-// signature does not verify (the caller quarantines it).
+// An object's verified metadata: null when there is none or, in the writable
+// store, its signer is not trusted (a miss, left in place); an error when it
+// is malformed or its signature does not verify (the caller quarantines it,
+// or notes it when it is in a layer). In a layer, a signature by any key is
+// accepted (provenance, D9).
 function readCasMetadata(cache: string, key: string, kind: CasKind): CasMetadata | null {
-  const directory = locateObject(cache, key);
-  if (directory === null) {
+  const located = locateObject(cache, key);
+  if (located === null) {
     return null;
   }
-  const metadata = parseCasMetadata(JSON.parse(fs.readFileSync(path.join(directory, "meta.json"), "utf8")), key, kind);
+  const metadata = parseCasMetadata(JSON.parse(fs.readFileSync(path.join(located.directory, "meta.json"), "utf8")), key, kind);
   const verdict = verifySignature(metadata, metadata.signature);
   if (verdict === "invalid") {
     throw new Error("CAS signature does not verify");
   }
-  return verdict === "trusted" ? metadata : null;
+  return verdict === "trusted" || located.layer ? metadata : null;
 }
 
 function readCasObject(
@@ -684,7 +690,7 @@ function readCasObject(
   if (metadata === null) {
     return null;
   }
-  const payload = fs.readFileSync(path.join(locateObject(cache, key) as string, payloadName(kind)));
+  const payload = fs.readFileSync(path.join((locateObject(cache, key) as { directory: string }).directory, payloadName(kind)));
   if (payload.byteLength !== metadata.bytes || sha256(payload) !== metadata.payloadSha256) {
     throw new Error("CAS payload digest mismatch");
   }
