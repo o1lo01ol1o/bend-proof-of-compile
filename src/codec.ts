@@ -17,7 +17,7 @@ import type {
 import { StoredTerms, TermTable } from "./term-table.ts";
 import { PocError } from "./error.ts";
 
-const PACK_SCHEMA = 6;
+const PACK_SCHEMA = 7;
 
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
@@ -25,13 +25,11 @@ const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
 type WireSpan = { readonly $span: readonly [number, number, number] };
 type WireValue = null | boolean | number | string | WireValue[] | { [key: string]: WireValue };
 
-// A stored record. A definition with a value has a checked body (`e`): the
-// root of its elaboration in the pack's term table (src/term-table.ts), which
-// keeps checker levels as variables, so a restored state compiles without
-// re-elaborating anything. `r` is the report's summary: the names the
-// record's types and elaboration refer to. `Term` is a lowered term: the
-// encoder builds records of the checker's lowered terms, whose spans the one
-// stringify pass writes as `WireSpan`s.
+// A stored record. A definition with a value has a checked body, stored in
+// the pack's elaboration (below) and restored on first read. `r` is the
+// report's summary: the names the record's types and elaboration refer to.
+// `Term` is a lowered term: the encoder builds records of the checker's
+// lowered terms, whose spans the one stringify pass writes as `WireSpan`s.
 interface WireAdt<Term> {
   readonly $: "ADT";
   readonly n: number;
@@ -53,7 +51,6 @@ interface WireDefinition<Term> {
   readonly u?: boolean;
   readonly l?: boolean;
   readonly i?: readonly string[];
-  readonly e?: number;
 }
 
 interface WireConstructor<Term> {
@@ -78,15 +75,36 @@ interface WirePack {
   readonly parent: string | null;
   readonly last: number;
   readonly sources: readonly SourceFileLike[];
-  // The pack's term table: every node of every stored body, and of every
-  // cell value lowered at its depth, once per content (src/term-table.ts).
-  readonly nodes: readonly WireValue[];
   readonly tlds: readonly (readonly [string, WireTopLevel<WireValue>])[];
   readonly ctrs: readonly string[];
   readonly order: readonly string[];
   readonly hols: number;
   readonly tmps: readonly (readonly [string, readonly (readonly [string, string])[]])[];
   readonly seen: readonly (readonly [string, string | null])[];
+}
+
+// A pack's elaboration, stored beside its state under the same key: the term
+// table (src/term-table.ts: every node of every checked body and of every
+// cell value lowered at its depth, once per content) and each valued
+// definition's body root. A check never reads it: restoring a chain of
+// states parses states only. A build reads the elaborations of the packs
+// whose definitions it compiles, one pack at a time, on the first read of a
+// definition's body.
+interface WireElaboration {
+  readonly schema: number;
+  readonly nodes: readonly WireValue[];
+  readonly roots: readonly (readonly [string, number])[];
+}
+
+// The two texts of a pack.
+export interface PackWire {
+  readonly state: string;
+  readonly elaboration: string;
+}
+
+export interface PackBytes {
+  readonly state: Buffer;
+  readonly elaboration: Buffer;
 }
 
 // The reference summaries of restored records, read without raising their
@@ -195,20 +213,22 @@ function termRefs(term: unknown, out: Set<string>, seen: Set<object>): void {
 const byName = <T>(left: readonly [string, T], right: readonly [string, T]): number =>
   left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0;
 
-// The canonical wire text of the records `child` adds over `parent`, where
+// The canonical wire texts of the records `child` adds over `parent`, where
 // child = book_over(parent) after book_valid (or any book whose own table keys
-// are its additions). `last` is the order index where its last file begins.
+// are its additions): the state, and the elaboration of its valued
+// definitions. `last` is the order index where its last file begins.
 export function encodePackWire(
   runtime: CompilerRuntime,
   parentKey: string | null,
   parent: BookStateLike,
   child: BookStateLike,
   last: number,
-): string {
+): PackWire {
   try {
     const book = child.book;
     const names = Object.keys(book.tlds).sort();
     const table = new TermTable(runtime.Bend);
+    const roots: Array<readonly [string, number]> = [];
     // Records hold lowered terms; one stringify pass writes them, turning each
     // span into a reference to its interned source text.
     const tlds = names.map((name) => {
@@ -216,7 +236,7 @@ export function encodePackWire(
       if (tld === undefined) {
         throw new PocError("CODEC", `book.tlds.${name} is missing`);
       }
-      return [name, encodeTopLevel(runtime, tld, (term) => runtime.Bend.term_lower(term), table)] as const;
+      return [name, encodeTopLevel(runtime, name, tld, (term) => runtime.Bend.term_lower(term), table, roots)] as const;
     });
     const sources: SourceFileLike[] = [];
     const sourceIds = new Map<string, number>();
@@ -256,7 +276,7 @@ export function encodePackWire(
       return value;
     };
     const records = JSON.stringify(tlds, replacer);
-    const nodeText = JSON.stringify(table.nodes, replacer);
+    const elaboration = JSON.stringify({ schema: PACK_SCHEMA, nodes: table.nodes as readonly WireValue[], roots } satisfies WireElaboration, replacer);
     const done = parent.book.order.length;
     if (
       book.order.length < done ||
@@ -285,8 +305,11 @@ export function encodePackWire(
       hols: book.hols,
       tmps,
       seen: [...child.seen.entries()].filter(([file]) => !parent.seen.has(file)).sort(byName),
-    } satisfies Omit<WirePack, "schema" | "parent" | "last" | "sources" | "nodes" | "tlds">);
-    return `${head.slice(0, -1)},"sources":${JSON.stringify(sources)},"nodes":${nodeText},"tlds":${records},${tail.slice(1)}`;
+    } satisfies Omit<WirePack, "schema" | "parent" | "last" | "sources" | "tlds">);
+    return {
+      state: `${head.slice(0, -1)},"sources":${JSON.stringify(sources)},"tlds":${records},${tail.slice(1)}`,
+      elaboration,
+    };
   } catch (cause) {
     if (cause instanceof PocError) {
       throw cause;
@@ -301,11 +324,12 @@ export function encodePack(
   parent: BookStateLike,
   child: BookStateLike,
   last: number,
-): Buffer {
-  return gzipSync(
-    Buffer.from(encodePackWire(runtime, parentKey, parent, child, last), "utf8"),
-    { level: 6 },
-  );
+): PackBytes {
+  const wire = encodePackWire(runtime, parentKey, parent, child, last);
+  return {
+    state: gzipSync(Buffer.from(wire.state, "utf8"), { level: 6 }),
+    elaboration: gzipSync(Buffer.from(wire.elaboration, "utf8"), { level: 6 }),
+  };
 }
 
 export interface DecodedPack {
@@ -316,33 +340,39 @@ export interface DecodedPack {
   // then becomes a plain data property; its setter makes an assignment through
   // a child table (a fill of a restored law) an own property of that child.
   readonly apply: (state: BookStateLike) => void;
-  // Raises every record now (verification).
+  // Raises every record and every body now (verification).
   readonly force: () => void;
 }
 
-export function decodePack(runtime: CompilerRuntime, compressed: Uint8Array): DecodedPack {
+function inflate(compressed: Uint8Array, what: string): string {
   if (compressed.byteLength > MAX_COMPRESSED_BYTES) {
-    throw new PocError("CODEC", "compressed pack exceeds the size limit", {
+    throw new PocError("CODEC", `compressed ${what} exceeds the size limit`, {
       bytes: compressed.byteLength,
       limit: MAX_COMPRESSED_BYTES,
     });
   }
-  let plain: string;
   try {
-    plain = gunzipSync(compressed, { maxOutputLength: MAX_UNCOMPRESSED_BYTES }).toString("utf8");
+    return gunzipSync(compressed, { maxOutputLength: MAX_UNCOMPRESSED_BYTES }).toString("utf8");
   } catch (cause) {
-    throw new PocError("CODEC", "pack is not valid gzip", {}, { cause });
+    throw new PocError("CODEC", `${what} is not valid gzip`, {}, { cause });
   }
-  return decodePackWire(runtime, plain);
 }
 
-export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedPack {
-  let parsed: unknown;
+// `elaboration` is read when a body is first needed, never for a check.
+export function decodePack(runtime: CompilerRuntime, state: Uint8Array, elaboration: () => Uint8Array): DecodedPack {
+  return decodePackWire(runtime, inflate(state, "pack"), () => inflate(elaboration(), "elaboration"));
+}
+
+function parseJson(text: string, what: string): unknown {
   try {
-    parsed = JSON.parse(text) as unknown;
+    return JSON.parse(text) as unknown;
   } catch (cause) {
-    throw new PocError("CODEC", "pack is not valid JSON", {}, { cause });
+    throw new PocError("CODEC", `${what} is not valid JSON`, {}, { cause });
   }
+}
+
+export function decodePackWire(runtime: CompilerRuntime, text: string, elaboration: () => string): DecodedPack {
+  const parsed = parseJson(text, "pack");
 
   try {
     const root = record(parsed, "pack");
@@ -366,19 +396,39 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
           [key, string(item, `${location}.al.${key}`)])),
       };
     });
-    // The term table is restored (interned names) when a body first needs
-    // it, and shared by every body of the pack.
-    const nodes = array(root.nodes, "pack.nodes");
-    let storedTerms: StoredTerms | undefined;
-    const stored = (): StoredTerms => {
-      storedTerms ??= new StoredTerms(runtime.Bend, nodes.map((value, index) => restoreValue(value, sources, `pack.nodes[${index}]`)));
-      return storedTerms;
+    // The elaboration is read, parsed and restored (interned names) when a
+    // body is first needed, once per pack, and shared by every body of the
+    // pack. Its roots must name this pack's valued definitions, exactly.
+    let loaded: Elaboration | undefined;
+    const stored = (): Elaboration => {
+      if (loaded === undefined) {
+        const raw = record(parseJson(elaboration(), "elaboration"), "elaboration");
+        if (raw.schema !== PACK_SCHEMA) {
+          throw new PocError("CODEC", "unsupported elaboration schema", { expected: PACK_SCHEMA, found: raw.schema });
+        }
+        const roots = new Map<string, number>();
+        for (const [index, item] of array(raw.roots, "elaboration.roots").entries()) {
+          const pair = tuple(item, 2, `elaboration.roots[${index}]`);
+          const name = string(pair[0], `elaboration.roots[${index}][0]`);
+          const entry = tlds.get(name);
+          if (entry === undefined || !entry.valued) {
+            throw new PocError("CODEC", `the elaboration names ${name}, which is not a valued definition of its pack`);
+          }
+          if (roots.has(name)) {
+            throw new PocError("CODEC", `the elaboration names ${name} twice`);
+          }
+          roots.set(name, nonNegativeInteger(pair[1], `elaboration.roots[${index}][1]`));
+        }
+        const nodes = array(raw.nodes, "elaboration.nodes").map((value, index) => restoreValue(value, sources, `elaboration.nodes[${index}]`));
+        loaded = { terms: new StoredTerms(runtime.Bend, nodes), roots };
+      }
+      return loaded;
     };
 
     // Names and constructor ownership are parsed now; terms when first read.
     const tlds = new Map<
       string,
-      { readonly raise: () => TopLevelLike; readonly adt: boolean; readonly summary: RecordSummary }
+      { readonly raise: () => TopLevelLike; readonly adt: boolean; readonly valued: boolean; readonly summary: RecordSummary }
     >();
     const ctrOwners = new Map<string, string>();
     for (const [index, rawEntry] of array(root.tlds, "pack.tlds").entries()) {
@@ -406,6 +456,7 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
       const foreign = raw.i !== undefined;
       tlds.set(name, {
         adt: tag === "ADT",
+        valued: tag === "Def" && raw.v !== null,
         summary: {
           base: raw.b === true,
           law: tag === "Def" && raw.l === true,
@@ -415,7 +466,7 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
         },
         raise: () => {
           if (raised === undefined) {
-            raised = decodeTopLevel(runtime, raw, sources, location, stored);
+            raised = decodeTopLevel(runtime, name, raw, sources, location, stored);
           }
           return raised;
         },
@@ -452,7 +503,10 @@ export function decodePackWire(runtime: CompilerRuntime, text: string): DecodedP
       last,
       force() {
         for (const entry of tlds.values()) {
-          entry.raise();
+          const tld = entry.raise();
+          if (tld.$ === "Def" && tld.v !== null) {
+            void tld.e;
+          }
         }
       },
       apply(state) {
@@ -533,9 +587,11 @@ function lazyProperty<T>(table: Record<string, T>, name: string, raise: () => T)
 
 function encodeTopLevel(
   runtime: CompilerRuntime,
+  name: string,
   tld: TopLevelLike,
   lower: (term: Parameters<CompilerRuntime["Bend"]["term_lower"]>[0]) => PlainTerm,
   table: TermTable,
+  roots: Array<readonly [string, number]>,
 ): WireTopLevel<PlainTerm> {
   const r = referencesOf(runtime, tld);
   if (tld.$ === "ADT") {
@@ -554,6 +610,7 @@ function encodeTopLevel(
       ...(tld.b === undefined ? {} : { b: tld.b }),
     };
   }
+  storeBody(name, tld, table, roots);
   return {
     $: "Def",
     n: tld.n,
@@ -565,23 +622,43 @@ function encodeTopLevel(
     ...(tld.u === undefined ? {} : { u: tld.u }),
     ...(tld.l === undefined ? {} : { l: tld.l }),
     ...(tld.i === undefined ? {} : { i: tld.i.map(pathReal) }),
-    ...storedBody(tld, table),
   };
 }
 
-// A definition with a value is checked, so it has a body; a declaration (a
-// law not yet filled, a foreign def) has none. The correlation is the wire's.
-function storedBody(tld: DefinitionLike, table: TermTable): { e?: number } {
+// A definition with a value is checked, so it has a body, stored in the
+// elaboration; a declaration (a law not yet filled, a foreign def) has none.
+function storeBody(name: string, tld: DefinitionLike, table: TermTable, roots: Array<readonly [string, number]>): void {
   if (tld.v === null) {
     if (tld.e !== undefined) {
-      throw new PocError("CODEC", "a declaration has a checked body");
+      throw new PocError("CODEC", `the declaration ${name} has a checked body`);
     }
-    return {};
+    return;
   }
   if (tld.e === undefined) {
-    throw new PocError("CODEC", "a definition with a value has no checked body");
+    throw new PocError("CODEC", `the definition ${name} has a value but no checked body`);
   }
-  return { e: table.body(tld.e) };
+  roots.push([name, table.body(tld.e)]);
+}
+
+interface Elaboration {
+  readonly terms: StoredTerms;
+  readonly roots: Map<string, number>;
+}
+
+// A field computed on first read, then a plain data property.
+function lazyField<T extends object>(target: T, name: string, make: () => unknown): void {
+  Object.defineProperty(target, name, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      const value = make();
+      Object.defineProperty(target, name, { value, writable: true, enumerable: true, configurable: true });
+      return value;
+    },
+    set(value: unknown) {
+      Object.defineProperty(target, name, { value, writable: true, enumerable: true, configurable: true });
+    },
+  });
 }
 
 // A path as the checker's CLI resolves it (main.ts path_real): its realpath
@@ -593,10 +670,11 @@ export function pathReal(file: string): string {
 
 function decodeTopLevel(
   runtime: CompilerRuntime,
+  name: string,
   raw: Record<string, unknown>,
   sources: readonly SourceFileLike[],
   location: string,
-  stored: () => StoredTerms,
+  stored: () => Elaboration,
 ): TopLevelLike {
   const references = stringArray(raw.r, `${location}.r`);
   let result: TopLevelLike;
@@ -633,12 +711,16 @@ function decodeTopLevel(
     if (raw.i !== undefined) {
       definition.i = stringArray(raw.i, `${location}.i`);
     }
-    if (definition.v === null) {
-      if (raw.e !== undefined) {
-        throw new PocError("CODEC", `a declaration has a stored body at ${location}`);
-      }
-    } else {
-      definition.e = stored().body(nonNegativeInteger(raw.e, `${location}.e`)) as PlainTerm;
+    if (definition.v !== null) {
+      // The body is restored from the pack's elaboration on first read.
+      lazyField(definition, "e", () => {
+        const { terms, roots } = stored();
+        const root = roots.get(name);
+        if (root === undefined) {
+          throw new PocError("CODEC", `the elaboration of ${name} is missing from its pack`);
+        }
+        return terms.body(root);
+      });
     }
     result = definition;
   }

@@ -2,14 +2,15 @@
 //
 // The fixture is two Base-free files: P declares a datatype, a function and a
 // law; A imports P and fills the law. Each is one sealed boundary, so the
-// check produces two packs. Golden vectors pin their wire text (with the
-// fixture directory abstracted); regenerate them deliberately with
-// POC_UPDATE_GOLDEN=1 when the checker or the pack schema changes.
+// check produces two packs, each a state text and an elaboration text. Golden
+// vectors pin both (with the fixture directory abstracted); regenerate them
+// deliberately with POC_UPDATE_GOLDEN=1 when the checker or the pack schema
+// changes.
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { decodePack, decodePackWire, encodePack, encodePackWire, referencesOf } from "../src/codec.ts";
+import { decodePack, decodePackWire, encodePack, encodePackWire, referencesOf, type PackWire } from "../src/codec.ts";
 import { loadCompiler, type BookStateLike, type CheckGroup, type SourceFileLike } from "../src/compiler.ts";
 
 const source = process.env.POC_BEND2_SOURCE;
@@ -25,7 +26,7 @@ interface Sealed {
   readonly parent: BookStateLike;
   readonly child: BookStateLike;
   readonly last: number;
-  readonly wire: string;
+  readonly wire: PackWire;
 }
 
 async function checkFixture(): Promise<Sealed[]> {
@@ -44,33 +45,47 @@ async function checkFixture(): Promise<Sealed[]> {
 
 const abstract = (wire: string): string => wire.split(fixture).join(DIR);
 const concrete = (wire: string): string => wire.split(DIR).join(fixture);
+const goldenFile = (index: number, part: keyof PackWire): string =>
+  path.join(golden, part === "state" ? `pack-v7-${index}.json` : `pack-v7-${index}.elaboration.json`);
+const decode = (wire: PackWire) => decodePackWire(runtime, wire.state, () => wire.elaboration);
 
 describe("packs", async () => {
   const sealed = await checkFixture();
 
-  test("golden vectors pin the wire text", () => {
+  test("golden vectors pin the wire texts", () => {
     expect(sealed.length).toBe(2);
     for (const [index, pack] of sealed.entries()) {
-      const file = path.join(golden, `pack-v6-${index}.json`);
-      if (process.env.POC_UPDATE_GOLDEN === "1") {
-        fs.writeFileSync(file, `${abstract(pack.wire)}\n`);
+      for (const part of ["state", "elaboration"] as const) {
+        const file = goldenFile(index, part);
+        if (process.env.POC_UPDATE_GOLDEN === "1") {
+          fs.writeFileSync(file, `${abstract(pack.wire[part])}\n`);
+        }
+        expect(abstract(pack.wire[part])).toBe(fs.readFileSync(file, "utf8").trimEnd());
       }
-      expect(abstract(pack.wire)).toBe(fs.readFileSync(file, "utf8").trimEnd());
     }
   });
 
-  test("a pack holds every checked body, and a restored body emits what the checked one does", () => {
+  test("a pack's elaboration holds every checked body, read on first use", () => {
     let parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     for (const pack of sealed) {
       const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map(parent.seen) };
-      decodePackWire(runtime, pack.wire).apply(child);
+      let reads = 0;
+      decodePackWire(runtime, pack.wire.state, () => {
+        reads += 1;
+        return pack.wire.elaboration;
+      }).apply(child);
+      let bodies = 0;
       for (const name of Object.keys(pack.child.book.tlds)) {
         const checked = pack.child.book.tlds[name];
         const restored = child.book.tlds[name];
         if (checked?.$ === "Def" && checked.e !== undefined) {
-          expect(restored).toHaveProperty("e");
+          expect(reads).toBe(bodies === 0 ? 0 : 1);
+          expect(restored?.$ === "Def" ? restored.e : undefined).toBeDefined();
+          bodies += 1;
         }
       }
+      // Read once per pack, on the first body, and never otherwise.
+      expect(reads).toBe(bodies === 0 ? 0 : 1);
       parent = child;
     }
   });
@@ -78,11 +93,14 @@ describe("packs", async () => {
   test("decode then encode is the identity on each golden pack", () => {
     let parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     for (let index = 0; index < sealed.length; index += 1) {
-      const text = concrete(fs.readFileSync(path.join(golden, `pack-v6-${index}.json`), "utf8").trimEnd());
-      const pack = decodePackWire(runtime, text);
+      const wire: PackWire = {
+        state: concrete(fs.readFileSync(goldenFile(index, "state"), "utf8").trimEnd()),
+        elaboration: concrete(fs.readFileSync(goldenFile(index, "elaboration"), "utf8").trimEnd()),
+      };
+      const pack = decode(wire);
       const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map(parent.seen) };
       pack.apply(child);
-      expect(encodePackWire(runtime, pack.parent, parent, child, pack.last)).toBe(text);
+      expect(encodePackWire(runtime, pack.parent, parent, child, pack.last)).toEqual(wire);
       parent = child;
     }
   });
@@ -94,15 +112,15 @@ describe("packs", async () => {
     }
     const bytes = encodePack(runtime, null, first.parent, first.child, first.last);
     const child: BookStateLike = { book: runtime.Main.book_over(first.parent.book), seen: new Map(first.parent.seen) };
-    decodePack(runtime, bytes).apply(child);
-    expect(encodePackWire(runtime, null, first.parent, child, first.last)).toBe(first.wire);
+    decodePack(runtime, bytes.state, () => bytes.elaboration).apply(child);
+    expect(encodePackWire(runtime, null, first.parent, child, first.last)).toEqual(first.wire);
   });
 
   test("a restored record's summary is the checked record's", () => {
     let parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     for (const pack of sealed) {
       const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map(parent.seen) };
-      decodePackWire(runtime, pack.wire).apply(child);
+      decode(pack.wire).apply(child);
       for (const name of Object.keys(pack.child.book.tlds)) {
         const checked = pack.child.book.tlds[name];
         const restored = child.book.tlds[name];
@@ -121,7 +139,7 @@ describe("packs", async () => {
       throw new Error("no pack");
     }
     const restored: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
-    decodePackWire(runtime, first.wire).apply(restored);
+    decode(first.wire).apply(restored);
     const child = runtime.Main.book_over(restored.book);
     const law = child.tlds["P:later"];
     if (law === undefined) {
@@ -150,7 +168,7 @@ describe("packs", async () => {
       };
       child.book.order.push(name);
     }
-    const baseline = encodePackWire(runtime, null, parent, child, 0);
+    const baseline = encodePackWire(runtime, null, parent, child, 0).state;
     type SourceWire = {
       sources: SourceFileLike[];
       tlds: [string, { T: { s: { $span: [number, number, number] } } }][];
@@ -164,12 +182,12 @@ describe("packs", async () => {
     expect(wire.tlds.map(([, record]) => record.T.s.$span)).toEqual(
       [0, 0, 0, 0, 1, 2, 0].map((id) => [id, 0, 1]),
     );
-    expect(encodePackWire(runtime, null, parent, child, 0)).toBe(baseline);
+    expect(encodePackWire(runtime, null, parent, child, 0).state).toBe(baseline);
     // A later encoding observes changed source contents, namespaces and aliases.
     shared.str = "changed source\n";
     shared.ns = "Changed";
     shared.al = { c: "C" };
-    const changed: SourceWire = JSON.parse(encodePackWire(runtime, null, parent, child, 0));
+    const changed: SourceWire = JSON.parse(encodePackWire(runtime, null, parent, child, 0).state);
     expect(changed.sources).toEqual([
       shared,
       { str: equal.str, ns: "P", al: { a: "A", z: "Z" } },
@@ -184,27 +202,41 @@ describe("packs", async () => {
     if (first === undefined) {
       throw new Error("no pack");
     }
-    const wire = JSON.parse(first.wire) as Record<string, unknown>;
+    const wire = JSON.parse(first.wire.state) as Record<string, unknown>;
+    const elaboration = JSON.parse(first.wire.elaboration) as { schema: number; nodes: unknown[]; roots: Array<[string, number]> };
     const reject = (changed: Record<string, unknown>): void => {
-      expect(() => decodePackWire(runtime, JSON.stringify(changed))).toThrow();
+      expect(() => decodePackWire(runtime, JSON.stringify(changed), () => first.wire.elaboration)).toThrow();
     };
     reject({ ...wire, schema: 2 });
-    reject({ ...wire, schema: 5 });
+    reject({ ...wire, schema: 6 });
     reject({ ...wire, ctrs: [] });
-    // A definition with a value has a body; a declaration has none.
-    const tlds = wire.tlds as Array<[string, Record<string, unknown>]>;
-    const valued = tlds.findIndex(([, record]) => record.$ === "Def" && record.v !== null);
-    const declared = tlds.findIndex(([, record]) => record.$ === "Def" && record.v === null);
-    expect(valued).toBeGreaterThanOrEqual(0);
-    expect(declared).toBeGreaterThanOrEqual(0);
-    const without = (index: number, change: (record: Record<string, unknown>) => Record<string, unknown>) =>
-      tlds.map(([name, record], at) => [name, at === index ? change(record) : record]);
-    const bodyless = decodePackWire(runtime, JSON.stringify({ ...wire, tlds: without(valued, ({ e: _e, ...rest }) => rest) }));
-    expect(() => bodyless.force()).toThrow();
-    const declaredWithBody = decodePackWire(runtime, JSON.stringify({ ...wire, tlds: without(declared, (record) => ({ ...record, e: 0 })) }));
-    expect(() => declaredWithBody.force()).toThrow();
     reject({ ...wire, last: -1 });
     reject({ ...wire, tlds: [...(wire.tlds as unknown[]), ...(wire.tlds as unknown[])] });
-    expect(() => decodePackWire(runtime, "{")).toThrow();
+    expect(() => decodePackWire(runtime, "{", () => first.wire.elaboration)).toThrow();
+    // The elaboration names every valued definition of its pack, and only
+    // those; a fault there is found when a body is read (force reads all).
+    const tlds = wire.tlds as Array<[string, Record<string, unknown>]>;
+    const valued = tlds.find(([, record]) => record.$ === "Def" && record.v !== null)?.[0];
+    const declared = tlds.find(([, record]) => record.$ === "Def" && record.v === null)?.[0];
+    if (valued === undefined || declared === undefined) {
+      throw new Error("the fixture has no valued definition or no declaration");
+    }
+    expect(elaboration.roots.map(([name]) => name)).toContain(valued);
+    const withElaboration = (changed: object) => decodePackWire(runtime, first.wire.state, () => JSON.stringify(changed));
+    expect(() => withElaboration({ ...elaboration, schema: 6 }).force()).toThrow();
+    expect(() => withElaboration({ ...elaboration, roots: elaboration.roots.filter(([name]) => name !== valued) }).force()).toThrow();
+    expect(() => withElaboration({ ...elaboration, roots: [...elaboration.roots, [declared, 0]] }).force()).toThrow();
+    expect(() => withElaboration({ ...elaboration, roots: [...elaboration.roots, [valued, 0]] }).force()).toThrow();
+    // A check never reads the elaboration.
+    const untouched = decodePackWire(runtime, first.wire.state, () => {
+      throw new Error("the elaboration was read");
+    });
+    const state: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
+    untouched.apply(state);
+    for (const name of Object.keys(state.book.tlds)) {
+      const record = state.book.tlds[name];
+      expect(record?.$).toBeDefined();
+      void record?.T;
+    }
   });
 });

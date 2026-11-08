@@ -117,7 +117,7 @@ describe("restored states", async () => {
   const entry = path.join(fixtures, "PolyRec.bend");
   const order = await runtime.loadSteps(entry, "entry");
   const groups = [...order.imports, order.entry].map((step, index) => ({ steps: [step], key: String(index).padStart(64, "0") }));
-  const wires: string[] = [];
+  const wires: Array<{ state: string; elaboration: string }> = [];
   await runtime.check(order.entry.path, "", groups, undefined, (_key, parent, child, last) => {
     wires.push(encodePackWire(runtime, null, parent, child, last));
   });
@@ -129,7 +129,7 @@ describe("restored states", async () => {
     let state = { book: runtime.Bend.book_nil(), seen: new Map<string, string | null>() };
     for (const wire of wires) {
       const child = { book: runtime.Main.book_over(state.book), seen: new Map(state.seen) };
-      decodePackWire(runtime, wire).apply(child);
+      decodePackWire(runtime, wire.state, () => wire.elaboration).apply(child);
       state = child;
     }
     expect(runtime.emit(state.book, "c")).toBe(c);

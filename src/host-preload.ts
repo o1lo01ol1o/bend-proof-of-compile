@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { decodePack, encodePack, pathReal } from "./codec.ts";
+import { decodePack, encodePack, pathReal, type PackBytes } from "./codec.ts";
 import {
   CAS_SCHEMA,
   reloadTrust,
@@ -64,6 +64,7 @@ interface StateStage {
     readonly cache: string;
     readonly key: string;
     readonly payload: string;
+    readonly elaboration: string;
     readonly record: StateRecord;
   }>;
   closed: boolean;
@@ -197,6 +198,7 @@ globalThis.POC_HOST = {
         cache: entry.cache,
         key: entry.key,
         payload: fs.readFileSync(entry.payload),
+        elaboration: fs.readFileSync(entry.elaboration),
         entry: { kind: "state", record: entry.record } as const,
       })));
     } finally {
@@ -226,7 +228,8 @@ globalThis.POC_HOST = {
       const checked = await runtime.check(root, namespace, groups, seed, (key, parent, child, last) => {
         const held = keys.get(parent);
         const foreigns = mergeForeigns(held?.foreigns ?? [], ownForeigns(child));
-        stageState(stage, cache, key, encodePack(runtime, held?.key ?? null, parent, child, last), {
+        const pack = encodePack(runtime, held?.key ?? null, parent, child, last);
+        stageState(stage, cache, key, pack, {
           parent: held?.key ?? null,
           foreigns,
         });
@@ -304,7 +307,8 @@ globalThis.POC_HOST = {
           continue;
         }
         if (item.kind === "state") {
-          decodePack(runtime, object.payload).force();
+          const state = object as { readonly payload: Buffer; readonly elaboration: () => Buffer };
+          decodePack(runtime, state.payload, state.elaboration).force();
         }
         valid += 1;
       } catch (error) {
@@ -417,17 +421,20 @@ function stepCount(groups: readonly CheckGroup[]): number {
 
 // Restores the chain of packs ending at `key` into one flat book. A missing
 // or corrupt link makes the state absent; a corrupt one is quarantined.
+// Elaborations are not read here: a body is read from its pack's elaboration
+// when a build first compiles its definition.
 function readState(cache: string, key: string): HeldState | null {
   assertDigest(key);
-  const chain: Array<{ key: string; payload: Buffer; record: StateRecord }> = [];
+  const chain: Array<{ key: string; payload: Buffer; elaboration: () => Buffer; record: StateRecord }> = [];
   let cursor: string | null = key;
   try {
     while (cursor !== null) {
-      const object: { readonly payload: Buffer; readonly record: StateRecord } | null = readCasObject(cache, cursor, "state");
+      const object: { readonly payload: Buffer; readonly elaboration: () => Buffer; readonly record: StateRecord } | null =
+        readCasObject(cache, cursor, "state");
       if (object === null) {
         return null;
       }
-      chain.push({ key: cursor, payload: object.payload, record: object.record });
+      chain.push({ key: cursor, payload: object.payload, elaboration: object.elaboration, record: object.record });
       cursor = object.record.parent;
       if (chain.length > 100_000) {
         throw new Error("state chain does not end");
@@ -441,7 +448,7 @@ function readState(cache: string, key: string): HeldState | null {
   let headLast = 0;
   for (const link of chain.reverse()) {
     try {
-      const pack = decodePack(runtime, link.payload);
+      const pack = decodePack(runtime, link.payload, link.elaboration);
       if (pack.parent !== link.record.parent) {
         throw new Error("pack parent disagrees with its metadata");
       }
@@ -494,7 +501,7 @@ function stageState(
   stage: StateStage,
   cache: string,
   key: string,
-  payload: Buffer,
+  pack: PackBytes,
   record: StateRecord,
 ): void {
   assertOpenStage(stage);
@@ -503,8 +510,10 @@ function stageState(
     throw new Error(`checkpoint key staged twice: ${key}`);
   }
   const file = path.join(stage.directory, `${stage.entries.length}.bin`);
-  fs.writeFileSync(file, payload, { mode: 0o600 });
-  stage.entries.push({ cache, key, payload: file, record });
+  const elaboration = path.join(stage.directory, `${stage.entries.length}.elaboration.bin`);
+  fs.writeFileSync(file, pack.state, { mode: 0o600 });
+  fs.writeFileSync(elaboration, pack.elaboration, { mode: 0o600 });
+  stage.entries.push({ cache, key, payload: file, elaboration, record });
 }
 
 function assertOpenStage(stage: StateStage): void {
@@ -577,6 +586,9 @@ function payloadName(kind: CasKind): string {
   return kind === "state" ? "state.bin" : "artifact.bin";
 }
 
+// A state's elaboration, stored beside it (src/codec.ts).
+const ELABORATION_NAME = "elaboration.bin";
+
 type CasEntry =
   | { readonly kind: "state"; readonly record: StateRecord }
   | { readonly kind: "artifact"; readonly reliant: readonly string[] };
@@ -621,14 +633,21 @@ function parseCasMetadata(raw: unknown, key: string, expectedKind: CasKind): Cas
   }
   const parent = value.parent;
   const foreigns = value.foreigns;
+  const elaborationSha256 = value.elaborationSha256;
+  const elaborationBytes = value.elaborationBytes;
   if (
     !(parent === null || (typeof parent === "string" && /^[0-9a-f]{64}$/.test(parent))) ||
     !Array.isArray(foreigns) ||
-    !foreigns.every((file): file is string => typeof file === "string" && path.isAbsolute(file))
+    !foreigns.every((file): file is string => typeof file === "string" && path.isAbsolute(file)) ||
+    typeof elaborationSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(elaborationSha256) ||
+    typeof elaborationBytes !== "number" ||
+    !Number.isSafeInteger(elaborationBytes) ||
+    elaborationBytes < 0
   ) {
     return invalid();
   }
-  return { ...common, kind: "state", parent, foreigns };
+  return { ...common, kind: "state", parent, foreigns, elaborationSha256, elaborationBytes };
 }
 
 // The kind an object's metadata declares, or null when there is no object
@@ -670,7 +689,7 @@ function readCasObject(
   cache: string,
   key: string,
   kind: "state",
-): { readonly payload: Buffer; readonly record: StateRecord } | null;
+): { readonly payload: Buffer; readonly record: StateRecord; readonly elaboration: () => Buffer } | null;
 function readCasObject(
   cache: string,
   key: string,
@@ -685,24 +704,37 @@ function readCasObject(
   cache: string,
   key: string,
   kind: CasKind,
-): { readonly payload: Buffer; readonly record?: StateRecord; readonly reliant?: readonly string[] } | null {
+): { readonly payload: Buffer; readonly record?: StateRecord; readonly elaboration?: () => Buffer; readonly reliant?: readonly string[] } | null {
   const metadata = readCasMetadata(cache, key, kind);
   if (metadata === null) {
     return null;
   }
-  const payload = fs.readFileSync(path.join((locateObject(cache, key) as { directory: string }).directory, payloadName(kind)));
+  const directory = (locateObject(cache, key) as { directory: string }).directory;
+  const payload = fs.readFileSync(path.join(directory, payloadName(kind)));
   if (payload.byteLength !== metadata.bytes || sha256(payload) !== metadata.payloadSha256) {
     throw new Error("CAS payload digest mismatch");
   }
-  return metadata.kind === "state"
-    ? { payload, record: { parent: metadata.parent, foreigns: metadata.foreigns } }
-    : { payload, reliant: metadata.reliant };
+  if (metadata.kind !== "state") {
+    return { payload, reliant: metadata.reliant };
+  }
+  // The elaboration is read on demand (a build's first body from this pack)
+  // and verified against the signed statement then.
+  const elaboration = (): Buffer => {
+    const bytes = fs.readFileSync(path.join(directory, ELABORATION_NAME));
+    if (bytes.byteLength !== metadata.elaborationBytes || sha256(bytes) !== metadata.elaborationSha256) {
+      throw new Error(`CAS elaboration digest mismatch at ${key}`);
+    }
+    return bytes;
+  };
+  return { payload, record: { parent: metadata.parent, foreigns: metadata.foreigns }, elaboration };
 }
 
 interface Publication {
   readonly cache: string;
   readonly key: string;
   readonly payload: Uint8Array;
+  // A state's elaboration (required for kind "state").
+  readonly elaboration?: Uint8Array;
   readonly entry: CasEntry;
 }
 
@@ -741,9 +773,9 @@ function signStatements(statements: readonly Statement[]): Signature[] {
 
 // Publishes objects in order (a pack after the packs it extends) to the
 // writable store. An object already present under a key, in that store or in
-// a layer, must hold the same payload; one whose signer is not trusted, or
-// whose signature does not verify, is replaced (shadowed, when it is in a
-// layer).
+// a layer, must hold the same state payload (the elaboration is a function of
+// it); one whose signer is not trusted, or whose signature does not verify,
+// is replaced (shadowed, when it is in a layer).
 function putCasObjects(publications: readonly Publication[]): void {
   const pending = publications.filter((publication) => {
     if (locateObject(publication.cache, publication.key) === null) {
@@ -765,11 +797,22 @@ function putCasObjects(publications: readonly Publication[]): void {
     }
     return false;
   });
-  const statements: Statement[] = pending.map(({ key, payload, entry }) => {
+  const statements: Statement[] = pending.map(({ key, payload, elaboration, entry }) => {
     const common = { key, payloadSha256: sha256(payload), bytes: payload.byteLength };
-    return entry.kind === "state"
-      ? { ...common, kind: "state", parent: entry.record.parent, foreigns: entry.record.foreigns }
-      : { ...common, kind: "artifact", reliant: entry.reliant };
+    if (entry.kind === "artifact") {
+      return { ...common, kind: "artifact", reliant: entry.reliant };
+    }
+    if (elaboration === undefined) {
+      throw new Error(`a state is published without its elaboration: ${key}`);
+    }
+    return {
+      ...common,
+      kind: "state",
+      elaborationSha256: sha256(elaboration),
+      elaborationBytes: elaboration.byteLength,
+      parent: entry.record.parent,
+      foreigns: entry.record.foreigns,
+    };
   });
   const signatures = signStatements(statements);
   pending.forEach((publication, index) => {
@@ -788,6 +831,9 @@ function writeCasObject(publication: Publication, metadata: CasMetadata): void {
   try {
     const body = Buffer.from(payload);
     fs.writeFileSync(path.join(temporary, payloadName(entry.kind)), body, { mode: 0o600 });
+    if (entry.kind === "state") {
+      fs.writeFileSync(path.join(temporary, ELABORATION_NAME), Buffer.from(publication.elaboration as Uint8Array), { mode: 0o600 });
+    }
     fs.writeFileSync(path.join(temporary, "meta.json"), `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
     try {
       fs.renameSync(temporary, directory);

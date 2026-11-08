@@ -82,7 +82,7 @@ class History {
 
   // This project's own (writable) store.
   store(): string {
-    return path.join(this.cache, "bend-proof-of-compile", "v4");
+    return path.join(this.cache, "bend-proof-of-compile", "v5");
   }
 
   // The step agrees with a cold check and a cold emit; the result is the
@@ -379,7 +379,7 @@ def main() -> IO(Unit):
     h.write("M.bend", M("5n"));
     h.write("E.bend", E("signed"));
     h.agree("E.bend");
-    const objects = path.join(h.cache, "bend-proof-of-compile", "v4", "objects");
+    const objects = path.join(h.store(), "objects");
     const metas = (): string[] => fs.readdirSync(objects).flatMap((bucket) =>
       fs.readdirSync(path.join(objects, bucket))
         .filter((name) => !name.includes(".tmp-"))

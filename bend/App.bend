@@ -1248,7 +1248,7 @@ def Cli.cached(args: List<&1, String>, cache: Result<&2, &2, String, String>) ->
 
 def Cli.program(args: List<&1, String>) -> IO(Unit):
   do IO<Unit>:
-    cache : Result<&2, &2, String, String> <- H.Host.cache_root("bend-proof-of-compile", "v4")
+    cache : Result<&2, &2, String, String> <- H.Host.cache_root("bend-proof-of-compile", "v5")
     Cli.cached(args, cache)
 
 def Cli.invoked(args: List<&1, String>) -> IO(Unit):

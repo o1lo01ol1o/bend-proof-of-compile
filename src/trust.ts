@@ -46,6 +46,9 @@ export type Statement =
       readonly key: string;
       readonly payloadSha256: string;
       readonly bytes: number;
+      // The elaboration stored beside the state (src/codec.ts).
+      readonly elaborationSha256: string;
+      readonly elaborationBytes: number;
       readonly parent: string | null;
       readonly foreigns: readonly string[];
     }
@@ -57,12 +60,12 @@ export type Statement =
       readonly reliant: readonly string[];
     };
 
-export const CAS_SCHEMA = 4;
+export const CAS_SCHEMA = 5;
 
 export function statementText(statement: Statement): string {
   const common = [`bend-proof-of-compile/cas/v${CAS_SCHEMA}`,  statement.kind, statement.key, statement.payloadSha256, statement.bytes];
   return JSON.stringify(statement.kind === "state"
-    ? [...common, statement.parent, statement.foreigns]
+    ? [...common, statement.elaborationSha256, statement.elaborationBytes, statement.parent, statement.foreigns]
     : [...common, statement.reliant]);
 }
 

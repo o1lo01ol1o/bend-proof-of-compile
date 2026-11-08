@@ -9,26 +9,32 @@ pinned source. This branch is `bend-2.0.40` on GitHub. `nix build
 .#proof-of-compile` passes: 39 tests (codec, stored elaborations, runtime, SHA,
 acceptance histories against the fork's CLI) and the install check.
 
-- **Stored elaborations (pack schema 6).** A pack carries one term table
-  (`src/term-table.ts`): every node of every checked body and every cell
-  value, lowered by the kernel at its binder depth, once per distinct
-  content and without spans. A definition with a value always has its body
-  (the codec refuses a pack that says otherwise), so a restored state
-  compiles with no re-elaboration: there is no replay, and `prepare_book` and
-  `book_valid(…, only)` are unused. Spans are what made elaborations big: on
-  bend-categories' `Interchange/Braided_Unsafe.bend` (1,020 bodies, 11.7 M
-  body nodes, 3.9 M cells) the table holds 484 K nodes (23.5 MB of JSON)
-  where the same content with spans is 26 M; the compiler reads no span of a
-  body or type (it keys types span-free). Cost: encoding that module takes
-  ~36 s against a 3.5–5 s check (the kernel's lowering is 3.5 s of it, the
-  table's hashing of the ~84 M lowered nodes the rest), with no memory above
-  the check's own peak; `demos/app_slash_boss_3d` encodes in 0.36 s against a
-  0.24 s check (83 K nodes, 3.8 MB), and decoding a whole module is under a
-  second. `test/term-table.test.ts` checks byte-identical C and JS over six
-  programs (Base's bodies included), the stability of the encoding after one
-  round trip (the kernel's raise reduces a redex it builds, so the first round
-  may store a reduced, equal form), and emission from a state restored
-  through real packs.
+- **Stored elaborations (pack schema 7, CAS schema 5, cache `v5`).** A
+  state object has two payloads under one key and one signature: the state
+  (`state.bin`: records with their lowered types and values, summaries,
+  order, sources) and its elaboration (`elaboration.bin`: one term table,
+  `src/term-table.ts`, holding every node of every checked body and every
+  cell value lowered at its binder depth, once per distinct content and
+  without spans, plus each valued definition's body root). A definition with
+  a value always has its body (the codec refuses otherwise); a declaration
+  never has one. A check never reads an elaboration: restoring a chain
+  parses states only, and a definition's `e` is a lazy field that reads and
+  parses its pack's elaboration on the first body a build compiles from that
+  pack. Before the split, restoring bend-categories' 1,091-link chain held
+  14.9 GB for a 6-second resume. Spans are what made elaborations big: on
+  `Interchange/Braided_Unsafe.bend` (1,020 bodies, 11.7 M body nodes, 3.9 M
+  cells) the table holds 484 K nodes (23.5 MB of JSON) where the same
+  content with spans is 26 M; the compiler reads no span of a body or type
+  and keys types span-free. Cost: encoding that module takes ~36 s against a
+  3.5–5 s check (3.5 s of it the kernel's lowering), with no memory above
+  the check's own peak; `demos/app_slash_boss_3d` encodes in 0.36 s against
+  a 0.24 s check; decoding a whole module is under a second. There is no
+  replay, and `prepare_book` and `book_valid(…, only)` are unused.
+  `test/term-table.test.ts` checks byte-identical C and JS over six programs
+  (Base's bodies included), a stable encoding after one round trip, and
+  emission from a state restored through real packs; `test/codec.test.ts`
+  pins both golden texts, that a check never reads the elaboration, and
+  that an elaboration naming the wrong definitions is refused.
 - **Layered stores.** `POC_STORE` names the writable store (default
   `$TMPDIR/bend-proof-of-compile/v4`, as before) and `POC_STORE_PATH`
   read-only stores searched after it; a Nix store path, or a `symlinkJoin`
