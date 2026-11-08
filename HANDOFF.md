@@ -39,6 +39,10 @@ acceptance histories against the fork's CLI) and the install check.
   read-only store layer serves states and artifacts" pins this; trust is
   unchanged (signatures against the reader's trusted keys), pending D9 in
   `SPEC-persistent-artifacts.md`.
+- **`poc plan [--module] FILE`** prints the load order a chain of boundaries
+  follows, one step per line as `namespace<TAB>realpath`, Base first and the
+  entry last; a flake materializes it (committed, checked for drift) to
+  define one derivation per dependency region without import-from-derivation.
 - **Constructor datatypes.** Packs keep `Ctr.f` (2.0.40, bendlang/bend
   #2053); without it a type error over a restored prefix crashed in
   rendering (`k.includes` on an undefined name).

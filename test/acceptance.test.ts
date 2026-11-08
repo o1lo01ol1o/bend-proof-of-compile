@@ -351,6 +351,26 @@ def main() -> IO(Unit):
     expect(stranger.agree(entry)).toContain("resumePrefix miss");
   }, 900_000);
 
+  // `poc plan` prints the load order a chain of boundaries follows: one step
+  // per line as "namespace<TAB>realpath", Base first, the entry last.
+  test("plan prints the load order, as an entry and as a module", () => {
+    const h = new History();
+    h.write("P.bend", P);
+    h.write("M.bend", M("5n"));
+    h.write("E.bend", E("planned"));
+    const dir = fs.realpathSync(h.dir);
+    const entry = h.poc(["plan", "E.bend"]);
+    expect(entry.code).toBe(0);
+    const lines = entry.stdout.trimEnd().split("\n");
+    expect(lines.length).toBe(4);
+    expect(lines[0]).toMatch(/^\t.*\/base\.bend$/);
+    expect(lines.slice(1)).toEqual([`P\t${dir}/P.bend`, `M\t${dir}/M.bend`, `\t${dir}/E.bend`]);
+    const module = h.poc(["plan", "--module", "M.bend"]);
+    expect(module.code).toBe(0);
+    expect(module.stdout.trimEnd().split("\n").slice(1)).toEqual([`P\t${dir}/P.bend`, `M\t${dir}/M.bend`]);
+    expect(h.poc(["plan"]).code).not.toBe(0);
+  }, 120_000);
+
   test("signed states: forgeries are quarantined, untrusted signers are misses", () => {
     const h = new History();
     h.write("P.bend", P);

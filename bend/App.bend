@@ -1121,6 +1121,41 @@ def App.build(+entry: String, +role: H.Role, +cache: String, +mode: Mode) -> IO(
     inputs : Result<&2, &2, String, H.CompilerInputs> <- H.Host.compiler_inputs()
     App.compiler_ready(entry, role, cache, mode, inputs)
 
+# Plans
+# -----
+#
+# `poc plan [--module] FILE` prints the load order the chain of sealed
+# boundaries follows, one step per line as "namespace<TAB>path", the entry
+# last. A flake materializes it to define one derivation per dependency.
+
+def App.plan.line(+step: H.LoadStep) -> String:
+  match step:
+    case H.LoadStep{path, namespace, text}:
+      String.concat(namespace <> "\t" <> path <> Nil{})
+
+def App.plan.lines(steps: List<&2, H.LoadStep>) -> IO(Unit):
+  match steps:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case step <> rest:
+      do IO<Unit>:
+        Unit <- IO.print(App.plan.line(step))
+        App.plan.lines(rest)
+
+def App.planned(order: Result<&2, &2, String, H.LoadOrder>) -> IO(Unit):
+  match order:
+    case Fail{error}:
+      App.fail(error)
+    case Done{+found}:
+      App.plan.lines(
+        List.append(&2, H.LoadStep, App.order.imports(found), App.order.entry(found) <> Nil{})
+      )
+
+def App.plan(entry: String, role: H.Role) -> IO(Unit):
+  do IO<Unit>:
+    order : Result<&2, &2, String, H.LoadOrder> <- H.Host.load_steps(entry, role)
+    App.planned(order)
+
 # CLI
 # ---
 
@@ -1187,6 +1222,10 @@ def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
       App.build(entry, H.AsModule{}, cache, Checking{})
     case "check" <> entry <> Nil{}:
       App.build(entry, H.AsEntry{}, cache, Checking{})
+    case "plan" <> "--module" <> entry <> Nil{}:
+      App.plan(entry, H.AsModule{})
+    case "plan" <> entry <> Nil{}:
+      App.plan(entry, H.AsEntry{})
     case "build" <> entry <> rest:
       Cli.build.options(rest, entry, cache, "out.js", "js")
     case "cache" <> "status" <> Nil{}:
@@ -1197,7 +1236,7 @@ def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
       Cli.gc(cache)
     case _:
       App.fail(
-        "usage: poc check [--module] [--allow-unsafe] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
+        "usage: poc check [--module] [--allow-unsafe] FILE | poc plan [--module] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
       )
 
 def Cli.cached(args: List<&1, String>, cache: Result<&2, &2, String, String>) -> IO(Unit):
