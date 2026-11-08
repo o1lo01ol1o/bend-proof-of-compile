@@ -6,7 +6,7 @@ poc runs on the fork's published series `poc/2.0.40` (tag
 `poc/2.0.40+poc.1`, `5158ac74`; `bend version` prints `2.0.40+poc.1`),
 pinned by revision in `flake.nix`; the version string is read from the
 pinned source. This branch is `bend-2.0.40` on GitHub. `nix build
-.#proof-of-compile` passes: 37 tests (codec, stored elaborations, runtime, SHA,
+.#proof-of-compile` passes: 39 tests (codec, stored elaborations, runtime, SHA,
 acceptance histories against the fork's CLI) and the install check.
 
 - **Stored elaborations (pack schema 6).** A pack carries one term table
