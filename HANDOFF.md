@@ -43,6 +43,18 @@ acceptance histories against the fork's CLI) and the install check.
   follows, one step per line as `namespace<TAB>realpath`, Base first and the
   entry last; a flake materializes it (committed, checked for drift) to
   define one derivation per dependency region without import-from-derivation.
+- **Composition as derivations** (`nix/composition.nix`, `lib.composition
+  { pkgs, poc }`). `chain` makes one derivation per region of a load order:
+  each checks a synthetic entry importing the hub modules of every region up
+  to its own, reads the regions before it as layers, and writes its region's
+  objects to its output; `store` joins layers; `build` emits an entry's
+  artifact against layers. The flake check `composition` chains a two-module
+  hub kit and builds an application against the join: the application checks
+  only its own entry, and its artifact is `bend -o`'s byte for byte. A
+  dependency must be a hub package (`0x<pkg>/…` under `BEND_LIB`): hub
+  namespaces are entry-independent, relative ones are not. Reuse is per
+  package pin and along load-order prefixes (`SPEC-persistent-artifacts.md`,
+  "Nix composition").
 - **Constructor datatypes.** Packs keep `Ctr.f` (2.0.40, bendlang/bend
   #2053); without it a type error over a restored prefix crashed in
   rendering (`k.includes` on an undefined name).
