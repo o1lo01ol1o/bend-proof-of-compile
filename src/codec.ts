@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { deflateRawSync, gunzipSync, gzipSync, inflateRawSync } from "node:zlib";
 
 import type {
   AdtLike,
@@ -9,6 +9,7 @@ import type {
   CompilerRuntime,
   ConstructorLike,
   DefinitionLike,
+  HigherTerm,
   PlainTerm,
   SourceFileLike,
   SpanLike,
@@ -17,7 +18,7 @@ import type {
 import { StoredTerms, TermTable } from "./term-table.ts";
 import { PocError } from "./error.ts";
 
-const PACK_SCHEMA = 7;
+const PACK_SCHEMA = 8;
 
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
@@ -25,42 +26,64 @@ const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
 type WireSpan = { readonly $span: readonly [number, number, number] };
 type WireValue = null | boolean | number | string | WireValue[] | { [key: string]: WireValue };
 
-// A stored record. A definition with a value has a checked body, stored in
-// the pack's elaboration (below) and restored on first read. `r` is the
-// report's summary: the names the record's types and elaboration refer to.
-// `Term` is a lowered term: the encoder builds records of the checker's
-// lowered terms, whose spans the one stringify pass writes as `WireSpan`s.
-interface WireAdt<Term> {
+// A stored record: what a restore reads eagerly (names, counts, flags, the
+// constructors' names, and `r`, the report's summary: the names the record's
+// types and elaboration refer to), and `t`, the record's terms as one
+// compressed blob (base64 of the raw-deflated JSON of `WireTerms`), inflated
+// and raised on the record's first read. A restored chain thus holds its
+// records' terms at their compressed size, not as parsed trees: one
+// bend-categories module's chain of 55 packs is 260 MB of term JSON and 24 MB
+// compressed. A definition with a value also has a checked body, stored in
+// the pack's elaboration (below) and restored on first read.
+interface WireAdt {
   readonly $: "ADT";
   readonly n: number;
   readonly g: number;
-  readonly T: Term;
-  readonly c: readonly WireConstructor<Term>[];
+  readonly c: readonly WireConstructor[];
   readonly r: readonly string[];
+  readonly t: string;
   readonly b?: boolean;
 }
 
-interface WireDefinition<Term> {
+interface WireDefinition {
   readonly $: "Def";
   readonly n: number;
   readonly x: number;
-  readonly T: Term;
-  readonly v: Term | null;
+  // Whether the definition has a value (and so a body in the elaboration).
+  readonly v: boolean;
   readonly r: readonly string[];
+  readonly t: string;
   readonly b?: boolean;
   readonly u?: boolean;
   readonly l?: boolean;
   readonly i?: readonly string[];
 }
 
-interface WireConstructor<Term> {
+interface WireConstructor {
   readonly k: string;
   readonly n: number;
-  readonly T: Term;
   readonly f: string;
 }
 
-type WireTopLevel<Term> = WireAdt<Term> | WireDefinition<Term>;
+type WireTopLevel = WireAdt | WireDefinition;
+
+// A record's terms: lowered terms whose spans are `WireSpan`s into the pack's
+// source table. A datatype's `c` holds its constructors' types in order.
+type WireTerms =
+  | { readonly T: WireValue; readonly c: readonly WireValue[] }
+  | { readonly T: WireValue; readonly v: WireValue | null };
+
+function deflateTerms(text: string): string {
+  return deflateRawSync(Buffer.from(text, "utf8"), { level: 6 }).toString("base64");
+}
+
+function inflateTerms(blob: string, location: string): string {
+  try {
+    return inflateRawSync(Buffer.from(blob, "base64")).toString("utf8");
+  } catch (cause) {
+    throw new PocError("CODEC", `the terms at ${location} are not valid deflate`, {}, { cause });
+  }
+}
 
 // A pack is what one sealed boundary adds to the state it extends: the
 // records a book_over child owns after book_valid (its events' names, a
@@ -75,7 +98,7 @@ interface WirePack {
   readonly parent: string | null;
   readonly last: number;
   readonly sources: readonly SourceFileLike[];
-  readonly tlds: readonly (readonly [string, WireTopLevel<WireValue>])[];
+  readonly tlds: readonly (readonly [string, WireTopLevel])[];
   readonly ctrs: readonly string[];
   readonly order: readonly string[];
   readonly hols: number;
@@ -229,15 +252,6 @@ export function encodePackWire(
     const names = Object.keys(book.tlds).sort();
     const table = new TermTable(runtime.Bend);
     const roots: Array<readonly [string, number]> = [];
-    // Records hold lowered terms; one stringify pass writes them, turning each
-    // span into a reference to its interned source text.
-    const tlds = names.map((name) => {
-      const tld = book.tlds[name];
-      if (tld === undefined) {
-        throw new PocError("CODEC", `book.tlds.${name} is missing`);
-      }
-      return [name, encodeTopLevel(runtime, name, tld, (term) => runtime.Bend.term_lower(term), table, roots)] as const;
-    });
     const sources: SourceFileLike[] = [];
     const sourceIds = new Map<string, number>();
     // Source files are stable during this encoding. Reuse their content ID
@@ -275,6 +289,16 @@ export function encodePackWire(
       }
       return value;
     };
+    // Each record's lowered terms are written by one stringify pass with the
+    // replacer, which turns each span into a reference to its interned source
+    // text, and stored as one compressed blob.
+    const tlds = names.map((name) => {
+      const tld = book.tlds[name];
+      if (tld === undefined) {
+        throw new PocError("CODEC", `book.tlds.${name} is missing`);
+      }
+      return [name, encodeTopLevel(runtime, name, tld, (terms) => deflateTerms(JSON.stringify(terms, replacer)), table, roots)] as const;
+    });
     const records = JSON.stringify(tlds, replacer);
     const elaboration = JSON.stringify({ schema: PACK_SCHEMA, nodes: table.nodes as readonly WireValue[], roots } satisfies WireElaboration, replacer);
     const done = parent.book.order.length;
@@ -456,7 +480,7 @@ export function decodePackWire(runtime: CompilerRuntime, text: string, elaborati
       const foreign = raw.i !== undefined;
       tlds.set(name, {
         adt: tag === "ADT",
-        valued: tag === "Def" && raw.v !== null,
+        valued: tag === "Def" && raw.v === true,
         summary: {
           base: raw.b === true,
           law: tag === "Def" && raw.l === true,
@@ -589,24 +613,24 @@ function encodeTopLevel(
   runtime: CompilerRuntime,
   name: string,
   tld: TopLevelLike,
-  lower: (term: Parameters<CompilerRuntime["Bend"]["term_lower"]>[0]) => PlainTerm,
+  blob: (terms: { readonly T: PlainTerm; readonly c: readonly PlainTerm[] } | { readonly T: PlainTerm; readonly v: PlainTerm | null }) => string,
   table: TermTable,
   roots: Array<readonly [string, number]>,
-): WireTopLevel<PlainTerm> {
+): WireTopLevel {
   const r = referencesOf(runtime, tld);
+  const lower = (term: HigherTerm): PlainTerm => runtime.Bend.term_lower(term);
   if (tld.$ === "ADT") {
     return {
       $: "ADT",
       n: tld.n,
       g: tld.g,
-      T: lower(tld.T),
       c: tld.c.map((constructor) => ({
         k: constructor.k,
         n: constructor.n,
-        T: lower(constructor.T),
         f: constructor.f,
       })),
       r,
+      t: blob({ T: lower(tld.T), c: tld.c.map((constructor) => lower(constructor.T)) }),
       ...(tld.b === undefined ? {} : { b: tld.b }),
     };
   }
@@ -615,9 +639,9 @@ function encodeTopLevel(
     $: "Def",
     n: tld.n,
     x: tld.x,
-    T: lower(tld.T),
-    v: tld.v === null ? null : lower(tld.v),
+    v: tld.v !== null,
     r,
+    t: blob({ T: lower(tld.T), v: tld.v === null ? null : lower(tld.v) }),
     ...(tld.b === undefined ? {} : { b: tld.b }),
     ...(tld.u === undefined ? {} : { u: tld.u }),
     ...(tld.l === undefined ? {} : { l: tld.l }),
@@ -677,33 +701,46 @@ function decodeTopLevel(
   stored: () => Elaboration,
 ): TopLevelLike {
   const references = stringArray(raw.r, `${location}.r`);
+  // The record's terms, inflated and parsed now that the record is read.
+  const terms = record(parseJson(inflateTerms(string(raw.t, `${location}.t`), `${location}.t`), `${location}.t`), `${location}.t`);
   let result: TopLevelLike;
   if (raw.$ === "ADT") {
+    const types = array(terms.c, `${location}.t.c`);
     const constructors = array(raw.c, `${location}.c`).map((item, index) => {
       const source = record(item, `${location}.c[${index}]`);
+      if (types[index] === undefined) {
+        throw new PocError("CODEC", `the terms of ${name} lack constructor ${index}'s type`);
+      }
       return {
         k: intern(string(source.k, `${location}.c[${index}].k`)),
         n: nonNegativeInteger(source.n, `${location}.c[${index}].n`),
-        T: higher(runtime, source.T, sources, `${location}.c[${index}].T`),
+        T: higher(runtime, types[index], sources, `${location}.t.c[${index}]`),
         f: intern(string(source.f, `${location}.c[${index}].f`)),
       } satisfies ConstructorLike;
     });
+    if (types.length !== constructors.length) {
+      throw new PocError("CODEC", `the terms of ${name} hold ${types.length} constructor types for ${constructors.length} constructors`);
+    }
     const adt: AdtLike = {
       $: "ADT",
       n: nonNegativeInteger(raw.n, `${location}.n`),
       g: nonNegativeInteger(raw.g, `${location}.g`),
-      T: higher(runtime, raw.T, sources, `${location}.T`),
+      T: higher(runtime, terms.T, sources, `${location}.t.T`),
       c: constructors,
     };
     assignOptionalBoolean(adt, "b", raw.b, `${location}.b`);
     result = adt;
   } else {
+    const valued = boolean(raw.v, `${location}.v`);
+    if (valued === (terms.v === null)) {
+      throw new PocError("CODEC", `the terms of ${name} disagree with its record about having a value`);
+    }
     const definition: DefinitionLike = {
       $: "Def",
       n: nonNegativeInteger(raw.n, `${location}.n`),
       x: nonNegativeInteger(raw.x, `${location}.x`),
-      T: higher(runtime, raw.T, sources, `${location}.T`),
-      v: raw.v === null ? null : higher(runtime, raw.v, sources, `${location}.v`),
+      T: higher(runtime, terms.T, sources, `${location}.t.T`),
+      v: terms.v === null ? null : higher(runtime, terms.v, sources, `${location}.t.v`),
     };
     assignOptionalBoolean(definition, "b", raw.b, `${location}.b`);
     assignOptionalBoolean(definition, "u", raw.u, `${location}.u`);

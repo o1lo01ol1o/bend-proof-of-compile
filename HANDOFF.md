@@ -9,10 +9,13 @@ pinned source. This branch is `bend-2.0.40` on GitHub. `nix build
 .#proof-of-compile` passes: 39 tests (codec, stored elaborations, runtime, SHA,
 acceptance histories against the fork's CLI) and the install check.
 
-- **Stored elaborations (pack schema 7, CAS schema 5, cache `v5`).** A
+- **Stored elaborations (pack schema 8, CAS schema 5, cache `v5`).** A
   state object has two payloads under one key and one signature: the state
-  (`state.bin`: records with their lowered types and values, summaries,
-  order, sources) and its elaboration (`elaboration.bin`: one term table,
+  (`state.bin`: records, summaries, order, sources; each record's lowered
+  type and value travel as one compressed blob, inflated on the record's
+  first read, so a restored chain holds its records' terms at their
+  compressed size: one module's 55-pack chain is 260 MB of term JSON, 24 MB
+  compressed) and its elaboration (`elaboration.bin`: one term table,
   `src/term-table.ts`, holding every node of every checked body and every
   cell value lowered at its binder depth, once per distinct content and
   without spans, plus each valued definition's body root). A definition with

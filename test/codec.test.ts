@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { inflateRawSync } from "node:zlib";
 
 import { decodePack, decodePackWire, encodePack, encodePackWire, referencesOf, type PackWire } from "../src/codec.ts";
 import { loadCompiler, type BookStateLike, type CheckGroup, type SourceFileLike } from "../src/compiler.ts";
@@ -46,7 +47,7 @@ async function checkFixture(): Promise<Sealed[]> {
 const abstract = (wire: string): string => wire.split(fixture).join(DIR);
 const concrete = (wire: string): string => wire.split(DIR).join(fixture);
 const goldenFile = (index: number, part: keyof PackWire): string =>
-  path.join(golden, part === "state" ? `pack-v7-${index}.json` : `pack-v7-${index}.elaboration.json`);
+  path.join(golden, part === "state" ? `pack-v8-${index}.json` : `pack-v8-${index}.elaboration.json`);
 const decode = (wire: PackWire) => decodePackWire(runtime, wire.state, () => wire.elaboration);
 
 describe("packs", async () => {
@@ -171,15 +172,18 @@ describe("packs", async () => {
     const baseline = encodePackWire(runtime, null, parent, child, 0).state;
     type SourceWire = {
       sources: SourceFileLike[];
-      tlds: [string, { T: { s: { $span: [number, number, number] } } }][];
+      tlds: [string, { t: string }][];
     };
+    // A record's terms travel as one compressed blob.
+    const spanOf = (record: { t: string }): [number, number, number] =>
+      (JSON.parse(inflateRawSync(Buffer.from(record.t, "base64")).toString("utf8")) as { T: { s: { $span: [number, number, number] } } }).T.s.$span;
     const wire: SourceWire = JSON.parse(baseline);
     expect(wire.sources).toEqual([
       { str: shared.str, ns: "P", al: { a: "A", z: "Z" } },
       { str: shared.str, ns: "Q", al: { a: "A", z: "Z" } },
       { str: shared.str, ns: "P", al: { a: "Different", z: "Z" } },
     ]);
-    expect(wire.tlds.map(([, record]) => record.T.s.$span)).toEqual(
+    expect(wire.tlds.map(([, record]) => spanOf(record))).toEqual(
       [0, 0, 0, 0, 1, 2, 0].map((id) => [id, 0, 1]),
     );
     expect(encodePackWire(runtime, null, parent, child, 0).state).toBe(baseline);
@@ -194,7 +198,7 @@ describe("packs", async () => {
       { str: equal.str, ns: "Q", al: { a: "A", z: "Z" } },
       { str: equal.str, ns: "P", al: { a: "Different", z: "Z" } },
     ]);
-    expect(changed.tlds.map(([, record]) => record.T.s.$span[0])).toEqual([0, 0, 1, 0, 2, 3, 1]);
+    expect(changed.tlds.map(([, record]) => spanOf(record)[0])).toEqual([0, 0, 1, 0, 2, 3, 1]);
   });
 
   test("malformed packs are rejected", () => {
@@ -208,7 +212,7 @@ describe("packs", async () => {
       expect(() => decodePackWire(runtime, JSON.stringify(changed), () => first.wire.elaboration)).toThrow();
     };
     reject({ ...wire, schema: 2 });
-    reject({ ...wire, schema: 6 });
+    reject({ ...wire, schema: 7 });
     reject({ ...wire, ctrs: [] });
     reject({ ...wire, last: -1 });
     reject({ ...wire, tlds: [...(wire.tlds as unknown[]), ...(wire.tlds as unknown[])] });
@@ -216,14 +220,20 @@ describe("packs", async () => {
     // The elaboration names every valued definition of its pack, and only
     // those; a fault there is found when a body is read (force reads all).
     const tlds = wire.tlds as Array<[string, Record<string, unknown>]>;
-    const valued = tlds.find(([, record]) => record.$ === "Def" && record.v !== null)?.[0];
-    const declared = tlds.find(([, record]) => record.$ === "Def" && record.v === null)?.[0];
+    const valued = tlds.find(([, record]) => record.$ === "Def" && record.v === true)?.[0];
+    const declared = tlds.find(([, record]) => record.$ === "Def" && record.v === false)?.[0];
     if (valued === undefined || declared === undefined) {
       throw new Error("the fixture has no valued definition or no declaration");
     }
     expect(elaboration.roots.map(([name]) => name)).toContain(valued);
     const withElaboration = (changed: object) => decodePackWire(runtime, first.wire.state, () => JSON.stringify(changed));
-    expect(() => withElaboration({ ...elaboration, schema: 6 }).force()).toThrow();
+    expect(() => withElaboration({ ...elaboration, schema: 7 }).force()).toThrow();
+    // A record whose terms are not valid deflate, or disagree with it, is
+    // refused when read.
+    const corrupt = tlds.map(([name, record]) => [name, name === valued ? { ...record, t: "not base64 deflate" } : record]);
+    expect(() => decodePackWire(runtime, JSON.stringify({ ...wire, tlds: corrupt }), () => first.wire.elaboration).force()).toThrow();
+    const swapped = tlds.map(([name, record]) => [name, name === valued ? { ...record, v: false } : record]);
+    expect(() => decodePackWire(runtime, JSON.stringify({ ...wire, tlds: swapped }), () => first.wire.elaboration).force()).toThrow();
     expect(() => withElaboration({ ...elaboration, roots: elaboration.roots.filter(([name]) => name !== valued) }).force()).toThrow();
     expect(() => withElaboration({ ...elaboration, roots: [...elaboration.roots, [declared, 0]] }).force()).toThrow();
     expect(() => withElaboration({ ...elaboration, roots: [...elaboration.roots, [valued, 0]] }).force()).toThrow();
