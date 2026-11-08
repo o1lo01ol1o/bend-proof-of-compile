@@ -14,19 +14,20 @@ import type {
   SpanLike,
   TopLevelLike,
 } from "./compiler.ts";
+import { decodeBody, encodeBody, type WireBody } from "./body-codec.ts";
 import { PocError } from "./error.ts";
 
-const PACK_SCHEMA = 4;
+const PACK_SCHEMA = 5;
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
 
 type WireSpan = { readonly $span: readonly [number, number, number] };
 type WireValue = null | boolean | number | string | WireValue[] | { [key: string]: WireValue };
 
-// A stored record. Elaborations (`e`) are not stored: they hold checker
-// levels that a raise without an environment misreads (F1), and only the
-// compiler and the report read them. `r` is the report's summary instead: the
-// names the record's types and elaboration refer to. `Term` is a lowered
+// A stored record. A definition's checked body (`e`) is stored by the body
+// codec (src/body-codec.ts), which keeps checker levels as variables, so a
+// restored state compiles without re-elaborating. `r` is the report's
+// summary: the names the record's types and elaboration refer to. `Term` is a lowered
 // term: the encoder builds records of the checker's lowered terms, whose spans
 // the one stringify pass writes as `WireSpan`s.
 interface WireAdt<Term> {
@@ -50,12 +51,14 @@ interface WireDefinition<Term> {
   readonly u?: boolean;
   readonly l?: boolean;
   readonly i?: readonly string[];
+  readonly e?: WireBody;
 }
 
 interface WireConstructor<Term> {
   readonly k: string;
   readonly n: number;
   readonly T: Term;
+  readonly f: string;
 }
 
 type WireTopLevel<Term> = WireAdt<Term> | WireDefinition<Term>;
@@ -527,6 +530,7 @@ function encodeTopLevel(
         k: constructor.k,
         n: constructor.n,
         T: lower(constructor.T),
+        f: constructor.f,
       })),
       r,
       ...(tld.b === undefined ? {} : { b: tld.b }),
@@ -543,6 +547,7 @@ function encodeTopLevel(
     ...(tld.u === undefined ? {} : { u: tld.u }),
     ...(tld.l === undefined ? {} : { l: tld.l }),
     ...(tld.i === undefined ? {} : { i: tld.i.map(pathReal) }),
+    ...(tld.e === undefined ? {} : { e: encodeBody(runtime.Bend, tld.e) }),
   };
 }
 
@@ -568,6 +573,7 @@ function decodeTopLevel(
         k: intern(string(source.k, `${location}.c[${index}].k`)),
         n: nonNegativeInteger(source.n, `${location}.c[${index}].n`),
         T: higher(runtime, source.T, sources, `${location}.c[${index}].T`),
+        f: intern(string(source.f, `${location}.c[${index}].f`)),
       } satisfies ConstructorLike;
     });
     const adt: AdtLike = {
@@ -592,6 +598,10 @@ function decodeTopLevel(
     assignOptionalBoolean(definition, "l", raw.l, `${location}.l`);
     if (raw.i !== undefined) {
       definition.i = stringArray(raw.i, `${location}.i`);
+    }
+    if (raw.e !== undefined) {
+      const body = record(restoreValue(raw.e, sources, `${location}.e`), `${location}.e`);
+      definition.e = decodeBody(runtime.Bend, { n: array(body.n, `${location}.e.n`), r: nonNegativeInteger(body.r, `${location}.e.r`) }) as PlainTerm;
     }
     result = definition;
   }

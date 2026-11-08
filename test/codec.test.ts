@@ -51,7 +51,7 @@ describe("packs", async () => {
   test("golden vectors pin the wire text", () => {
     expect(sealed.length).toBe(2);
     for (const [index, pack] of sealed.entries()) {
-      const file = path.join(golden, `pack-v4-${index}.json`);
+      const file = path.join(golden, `pack-v5-${index}.json`);
       if (process.env.POC_UPDATE_GOLDEN === "1") {
         fs.writeFileSync(file, `${abstract(pack.wire)}\n`);
       }
@@ -59,16 +59,26 @@ describe("packs", async () => {
     }
   });
 
-  test("a pack holds no elaborations", () => {
+  test("a pack holds every checked body, and a restored body emits what the checked one does", () => {
+    let parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     for (const pack of sealed) {
-      expect(pack.wire.includes('"e":')).toBe(false);
+      const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map(parent.seen) };
+      decodePackWire(runtime, pack.wire).apply(child);
+      for (const name of Object.keys(pack.child.book.tlds)) {
+        const checked = pack.child.book.tlds[name];
+        const restored = child.book.tlds[name];
+        if (checked?.$ === "Def" && checked.e !== undefined) {
+          expect(restored).toHaveProperty("e");
+        }
+      }
+      parent = child;
     }
   });
 
   test("decode then encode is the identity on each golden pack", () => {
     let parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
     for (let index = 0; index < sealed.length; index += 1) {
-      const text = concrete(fs.readFileSync(path.join(golden, `pack-v4-${index}.json`), "utf8").trimEnd());
+      const text = concrete(fs.readFileSync(path.join(golden, `pack-v5-${index}.json`), "utf8").trimEnd());
       const pack = decodePackWire(runtime, text);
       const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map(parent.seen) };
       pack.apply(child);
@@ -99,7 +109,6 @@ describe("packs", async () => {
         if (checked === undefined || restored === undefined) {
           throw new Error(`missing ${name}`);
         }
-        expect(restored).not.toHaveProperty("e");
         expect(referencesOf(runtime, restored)).toEqual(referencesOf(runtime, checked));
       }
       parent = child;
