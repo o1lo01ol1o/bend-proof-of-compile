@@ -155,9 +155,17 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   `check` (each group in a `book_over` child, later files skipped by `on` and
   forgotten, then `book_valid`), `verdict` (TODO count and Bend's canonical
   `book_report` over lazy summaries of the whole checked book),
-  `emit`, `emitRestored` (the
-  replay: `book_valid(book, 0, only)` over what `main` reaches, closed under
-  instance callers), and the checker's error rendering (`book_err`).
+  `emit`, `emitRestored`, and the checker's error rendering (`book_err`).
+  Restored emission first calls Bend's `Comp.prepare_book(book, target)` to
+  elaborate the output wrapper, then replays `book_valid(book, 0, only)` over
+  the prepared main's dependencies, closed under instance callers. Wrapper
+  generation stays in Bend; its runtime dependencies must be visible before
+  choosing replay's reachability set. Replay owns shallow record copies,
+  including template instances, because re-elaboration writes `Def.e`;
+  checked ancestors and restored snapshots remain immutable. This allocates
+  emission-local copies, not retained elaborations or extension-time prefix
+  copies. The adapter now requires the `prepare_book` compiler API; old
+  compiler packages need a coordinated source/pin update before deployment.
 - `src/codec.ts` — packs (schema 4): a sealed boundary's own records without
   elaborations, with reference summaries; canonical; lazy restore through
   accessor properties; summaries readable without raising.

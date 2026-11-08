@@ -115,6 +115,7 @@ interface MainModule {
 }
 
 interface CompModule {
+  prepare_book(book: BookLike, target: Target): BookLike;
   compile_book(book: BookLike): string;
   js_book(book: BookLike): string;
   js_lib(book: BookLike, mod?: boolean): string;
@@ -247,6 +248,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     typeof Main.book_flat !== "function" ||
     typeof Main.book_report !== "function" ||
     typeof Main.book_err !== "function" ||
+    typeof Comp.prepare_book !== "function" ||
     typeof Comp.compile_book !== "function" ||
     typeof Comp.js_book !== "function" ||
     typeof Comp.js_lib !== "function" ||
@@ -314,7 +316,9 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     for (const name of instances) {
       const tld = book.tlds[name];
       if (tld !== undefined) {
-        base[name] = tld;
+        // Re-elaboration writes e on definitions, including template instances.
+        // A replay owns those records; checked snapshot records remain immutable.
+        base[name] = { ...tld };
       }
     }
     const events = Object.create(base) as BookLike["tlds"];
@@ -323,7 +327,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
       if (tld === undefined) {
         throw new PocError("CODEC", `the restored state has no record for ${name}`);
       }
-      events[name] = tld;
+      events[name] = base[name] ?? { ...tld };
     }
     const tmps = Object.create(null) as BookLike["tmps"];
     for (const [name, table] of Object.entries(book.tmps)) {
@@ -470,7 +474,10 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     },
     emitRestored(state, target) {
       try {
-        return emit(replay(state.book), target);
+        // Bend's output wrapper introduces runtime dependencies absent from the
+        // user main's summary. Replay the prepared program, not just that main.
+        const prepared = Comp.prepare_book(Main.book_flat(state.book), target);
+        return emit(replay(prepared), target);
       } catch (cause) {
         throw rejected(cause, { target });
       }

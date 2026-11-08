@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { decodePack, decodePackWire, encodePack, encodePackWire, referencesOf } from "../src/codec.ts";
-import { loadCompiler, type BookStateLike, type CheckGroup } from "../src/compiler.ts";
+import { loadCompiler, type BookStateLike, type CheckGroup, type SourceFileLike } from "../src/compiler.ts";
 
 const source = process.env.POC_BEND2_SOURCE;
 if (source === undefined) {
@@ -121,6 +121,53 @@ describe("packs", async () => {
     child.tlds["P:later"] = { ...law };
     expect(Object.hasOwn(child.tlds, "P:later")).toBe(true);
     expect(restored.book.tlds["P:later"]).toBe(law);
+  });
+
+  test("source identity preserves content deduplication and encoding-local IDs", () => {
+    const parent: BookStateLike = { book: runtime.Bend.book_nil(), seen: new Map() };
+    const child: BookStateLike = { book: runtime.Main.book_over(parent.book), seen: new Map() };
+    const shared: { str: string; ns: string; al: Record<string, string> } = {
+      str: "source\n".repeat(1000), ns: "P", al: { z: "Z", a: "A" },
+    };
+    const equal: SourceFileLike = { str: shared.str, ns: "P", al: { a: "A", z: "Z" } };
+    const otherNamespace: SourceFileLike = { ...shared, ns: "Q" };
+    const otherAlias: SourceFileLike = { ...shared, al: { a: "Different", z: "Z" } };
+    const files = [shared, shared, equal, shared, otherNamespace, otherAlias, equal];
+    for (const [index, file] of files.entries()) {
+      const name = `P:d${index}`;
+      child.book.tlds[name] = {
+        $: "Def", n: index, x: 0,
+        T: runtime.Bend.term_higher({ $: "Set", s: { file, beg: 0, end: 1 } }), v: null,
+      };
+      child.book.order.push(name);
+    }
+    const baseline = encodePackWire(runtime, null, parent, child, 0);
+    type SourceWire = {
+      sources: SourceFileLike[];
+      tlds: [string, { T: { s: { $span: [number, number, number] } } }][];
+    };
+    const wire: SourceWire = JSON.parse(baseline);
+    expect(wire.sources).toEqual([
+      { str: shared.str, ns: "P", al: { a: "A", z: "Z" } },
+      { str: shared.str, ns: "Q", al: { a: "A", z: "Z" } },
+      { str: shared.str, ns: "P", al: { a: "Different", z: "Z" } },
+    ]);
+    expect(wire.tlds.map(([, record]) => record.T.s.$span)).toEqual(
+      [0, 0, 0, 0, 1, 2, 0].map((id) => [id, 0, 1]),
+    );
+    expect(encodePackWire(runtime, null, parent, child, 0)).toBe(baseline);
+    // A later encoding observes changed source contents, namespaces and aliases.
+    shared.str = "changed source\n";
+    shared.ns = "Changed";
+    shared.al = { c: "C" };
+    const changed: SourceWire = JSON.parse(encodePackWire(runtime, null, parent, child, 0));
+    expect(changed.sources).toEqual([
+      shared,
+      { str: equal.str, ns: "P", al: { a: "A", z: "Z" } },
+      { str: equal.str, ns: "Q", al: { a: "A", z: "Z" } },
+      { str: equal.str, ns: "P", al: { a: "Different", z: "Z" } },
+    ]);
+    expect(changed.tlds.map(([, record]) => record.T.s.$span[0])).toEqual([0, 0, 1, 0, 2, 3, 1]);
   });
 
   test("malformed packs are rejected", () => {

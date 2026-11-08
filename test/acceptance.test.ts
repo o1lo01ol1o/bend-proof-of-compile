@@ -198,6 +198,26 @@ describe("incremental histories agree with cold checks", () => {
     expect(h.agree("E.bend")).not.toContain("bookCheck");
   }, 900_000);
 
+  test("a long sealed history survives suffix edits and branching after restart", () => {
+    const h = new History();
+    for (let index = 0; index < 32; index++) {
+      h.write(`D${index}.bend`, index === 0
+        ? "import Base\n\ndef value() -> Nat:\n  0n\n"
+        : `import Base\nimport ./D${index - 1}.bend as Prev\n\ndef value() -> Nat:\n  Nat.add(Prev.value(), 1n)\n`);
+    }
+    const entry = (label: string) => `import Base\nimport ./D31.bend as D\n\ndef main() -> IO(Unit):\n  IO.print("${label} " ++ Nat.show(D.value()))\n`;
+    h.write("E.bend", entry("original"));
+    expect(h.agree("E.bend")).toContain("resumePrefix miss");
+    h.write("E.bend", entry("suffix"));
+    expect(h.agree("E.bend")).toContain("remainingSteps=1");
+    h.write("D16.bend", "import Base\nimport ./D15.bend as Prev\n\ndef value() -> Nat:\n  Nat.add(Prev.value(), 2n)\n");
+    // D0–D15 remain reusable; D16–D31 and the entry form the 17-step suffix.
+    expect(h.agree("E.bend")).toContain("resumePrefix rank=16 remainingGroups=17 remainingSteps=17");
+    h.write("D16.bend", "import Base\nimport ./D15.bend as Prev\n\ndef value() -> Nat:\n  Nat.add(Prev.value(), 1n)\n");
+    h.write("E.bend", entry("original"));
+    expect(h.agree("E.bend")).not.toContain("bookCheck");
+  }, 900_000);
+
   test("a law filled by a later file, and prefixes that leave a law open or a hole", () => {
     const h = new History();
     h.write("P.bend", P);

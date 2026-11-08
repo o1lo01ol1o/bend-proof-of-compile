@@ -210,6 +210,10 @@ export function encodePackWire(
     });
     const sources: SourceFileLike[] = [];
     const sourceIds = new Map<string, number>();
+    // Source files are stable during this encoding. Reuse their content ID
+    // without repeatedly serializing the full file for every span; equal but
+    // distinct files still share the canonical content-based source table.
+    const sourceObjects = new WeakMap<SourceFileLike, number>();
     const records = JSON.stringify(tlds, function (this: unknown, _key: string, value: unknown): unknown {
       if (typeof value === "number" && !Number.isFinite(value)) {
         throw new PocError("CODEC", "term contains a non-finite number", { value });
@@ -221,17 +225,21 @@ export function encodePackWire(
         // A parser is also a File, but its extra fields include a cyclic book.
         // Persist only the File interface needed for diagnostics and name display.
         const file = value.file;
-        const source: SourceFileLike = {
-          str: file.str,
-          ns: file.ns,
-          al: Object.fromEntries(Object.entries(file.al).sort(byName)),
-        };
-        const key = JSON.stringify(source);
-        let sourceId = sourceIds.get(key);
+        let sourceId = sourceObjects.get(file);
         if (sourceId === undefined) {
-          sourceId = sources.length;
-          sources.push(source);
-          sourceIds.set(key, sourceId);
+          const source: SourceFileLike = {
+            str: file.str,
+            ns: file.ns,
+            al: Object.fromEntries(Object.entries(file.al).sort(byName)),
+          };
+          const key = JSON.stringify(source);
+          sourceId = sourceIds.get(key);
+          if (sourceId === undefined) {
+            sourceId = sources.length;
+            sources.push(source);
+            sourceIds.set(key, sourceId);
+          }
+          sourceObjects.set(file, sourceId);
         }
         return { $span: [sourceId, value.beg, value.end] } satisfies WireSpan;
       }

@@ -213,7 +213,10 @@ globalThis.POC_HOST = {
       `check groups=${groups.length} steps=${stepCount(groups)} seeded=${seed !== undefined}`,
     );
     try {
-      const keys = new Map<BookStateLike, HeldState>();
+      // The runtime owns live parent/child states; this index must not keep
+      // every obsolete book, seen map and snapshot metadata alive until return.
+      // Durable history lives in the staged packs, not in this identity lookup.
+      const keys = new WeakMap<BookStateLike, HeldState>();
       if (seed !== undefined) {
         keys.set(seed, seed);
       }
