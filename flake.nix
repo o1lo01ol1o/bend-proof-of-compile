@@ -308,6 +308,16 @@
         }
       );
 
+      # Bend dependencies as derivations composed with symlinkJoin: `chain`
+      # (one derivation per region of a load order), `store` (the joined
+      # layer) and `build` (an artifact against layers). nix/composition.nix.
+      lib.composition =
+        { pkgs, poc }:
+        import ./nix/composition.nix {
+          inherit pkgs poc;
+          lib = nixpkgs.lib;
+        };
+
       apps = forEachSystem (
         system:
         let
@@ -330,6 +340,76 @@
           bendHashes = self.packages.${system}.bend-hashes;
         in
         {
+          # A two-module hub kit, chained region by region; an application
+          # built against the joined store checks only its own entry and emits
+          # the stock emitter's bytes.
+          composition =
+            let
+              cl = self.lib.composition {
+                inherit pkgs;
+                poc = self.packages.${system}.proof-of-compile;
+              };
+              kit = pkgs.runCommand "composition-kit" { } ''
+                mkdir -p "$out/0xc0de"
+                cat > "$out/0xc0de/A.bend" <<'EOF'
+                import Base
+
+                def a() -> Nat:
+                  1n
+                EOF
+                cat > "$out/0xc0de/B.bend" <<'EOF'
+                import Base
+                import 0xc0de/A.bend as A
+
+                def b() -> Nat:
+                  Nat.add(A.a(), 1n)
+                EOF
+              '';
+              regions = cl.chain {
+                name = "composition";
+                inherit kit;
+                regions = [
+                  [ "0xc0de/A.bend" ]
+                  [ "0xc0de/B.bend" ]
+                ];
+              };
+              app = pkgs.writeTextDir "main.bend" ''
+                import Base
+                import 0xc0de/B.bend as B
+
+                def main() -> IO(Unit):
+                  IO.print(Nat.show(B.b()))
+              '';
+              built = cl.build {
+                name = "composition-app";
+                inherit kit;
+                src = app;
+                entry = "main.bend";
+                layers = regions;
+              };
+            in
+            pkgs.runCommand "composition-check"
+              {
+                nativeBuildInputs = [
+                  bend
+                  pkgs.bun
+                ];
+              }
+              ''
+                # Resumed from the chain: only the entry itself was checked.
+                grep -q 'resumePrefix rank=0 remainingGroups=1 remainingSteps=1' ${built}/trace.err
+                # Each region adds objects of its own.
+                test -d ${nixpkgs.lib.elemAt regions 0}/objects
+                test -d ${nixpkgs.lib.elemAt regions 1}/objects
+                # The artifact is the stock emitter's, byte for byte, and runs.
+                export BEND_LIB=${kit} HOME="$TMPDIR"
+                cd ${app}
+                bend main.bend -o "$TMPDIR/cold.js"
+                cmp "$TMPDIR/cold.js" ${built}/artifact.js
+                bun ${built}/artifact.js | grep -q 2
+                touch "$out"
+              '';
+
           infrastructure =
             pkgs.runCommand "bend-proof-of-compile-infrastructure-check"
               {
