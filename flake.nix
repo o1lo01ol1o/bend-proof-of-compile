@@ -8,18 +8,11 @@
     devenv.url = "github:cachix/devenv";
     devenv.inputs.nixpkgs.follows = "nixpkgs";
 
-    bend-categories = {
-      url = "git+https://gitlab.outstandinglabs.ai/o1lo01ol1o/bend-categories.git?ref=upstream-5108-v2";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.systems.follows = "systems";
-      inputs.devenv.follows = "devenv";
-      inputs.bend-src.follows = "bend-src";
-    };
-
     bend-src = {
-      # Isolated triad checkpoint on upstream 7a7e6505: checked-book replay,
-      # Promise runtime and explicit unsafe checking. Local pin, not a release.
-      url = "git+file:///Users/timpierson/Work/bend-triad-7a7e6505/bend?rev=1b8140bfea9023a5d2bd35164e1654df5f4e8822";
+      # The fork's poc series on upstream v2.0.40 (tag poc/2.0.40+poc.1):
+      # checked-book API, Promise scheduler, report policy, alpha-congruence.
+      # Pinned by revision; bend-categories follows this pin.
+      url = "github:o1lo01ol1o/bend/5158ac7442425ec44dd8f77cb5ce11060ea507e2";
       flake = false;
     };
 
@@ -40,19 +33,24 @@
       nixpkgs,
       devenv,
       systems,
-      bend-categories,
       bend-src,
       bend-hashes-src,
       ...
     }:
     let
-      bendVersion = "2.0.39";
+      # The version the pinned CLI prints (VERSION and BUILD in main.ts), read
+      # from the locked source so it cannot drift from the pin.
+      bendVersion =
+        let
+          main = builtins.readFile "${bend-src}/bend2/main.ts";
+          field = name: builtins.head (builtins.match ".*\nconst ${name} = \"([^\"]*)\";.*" main);
+        in
+        field "VERSION" + field "BUILD";
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
       checkScript = ''
         set -euo pipefail
         test "$(bend version)" = "bend ${bendVersion}"
         test -f "$BEND2_SRC/main.ts"
-        test -f "$BEND_CATEGORIES_SRC/flake.nix"
         test -f "$BEND_HASHES_SRC/main.bend"
 
         tmp_dir="$(mktemp -d)"
@@ -332,8 +330,6 @@
           bendHashes = self.packages.${system}.bend-hashes;
         in
         {
-          bend-categories = bend-categories.checks.${system}.bend-categories;
-
           infrastructure =
             pkgs.runCommand "bend-proof-of-compile-infrastructure-check"
               {
@@ -342,7 +338,6 @@
                   pkgs.bun
                 ];
                 BEND2_SRC = "${bend}/share/bend/bend2";
-                BEND_CATEGORIES_SRC = bend-categories.outPath;
                 BEND_HASHES_SRC = "${bendHashes}/share/bend/hashes";
               }
               ''
@@ -374,8 +369,7 @@
 
                 env = {
                   BEND2_SRC = "${bend}/share/bend/bend2";
-                  BEND_CATEGORIES_SRC = bend-categories.outPath;
-                  BEND_HASHES_SRC = "${bendHashes}/share/bend/hashes";
+                    BEND_HASHES_SRC = "${bendHashes}/share/bend/hashes";
                 };
 
                 scripts.check.exec = checkScript;
