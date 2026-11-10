@@ -2,7 +2,9 @@
 // directories, the pinned checker's CLI (`bend FILE --check-only`, and
 // `bend FILE -o OUT.js` for files with a main) and this application
 // (`poc check FILE`, `poc build FILE --output OUT.js`) must agree byte for
-// byte on stdout, stderr, exit status and artifact.
+// byte on stdout, stderr, exit status and artifact. poc's stderr may add one
+// line after a rejection, the source position (At: FILE:LINE:COL); the rest
+// of it is compared.
 //
 //   bun tools/cold-equivalence.ts [--emit] [--jobs N] [--rounds N] (DIR | FILE)...
 //
@@ -12,6 +14,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+import { withoutPosition } from "../src/compiler.ts";
 
 const args = process.argv.slice(2);
 let emit = false;
@@ -69,7 +73,7 @@ async function run(cmd: string[], cwd: string): Promise<Run> {
 }
 
 const same = (a: Run, b: Run): boolean =>
-  a.code === b.code && a.stdout === b.stdout && a.stderr === b.stderr;
+  a.code === b.code && a.stdout === b.stdout && a.stderr === withoutPosition(b.stderr);
 
 const failures: string[] = [];
 let compared = 0;
@@ -95,7 +99,7 @@ async function compare(file: string, round: number): Promise<void> {
   const pocEmit = await run([process.execPath, cli, "build", name, "--output", pocOut, "--target", "js"], cwd);
   emitted += 1;
   const bytes = (file: string): string => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "<none>");
-  if (coldEmit.code !== pocEmit.code || coldEmit.stderr !== pocEmit.stderr || bytes(coldOut) !== bytes(pocOut)) {
+  if (coldEmit.code !== pocEmit.code || coldEmit.stderr !== withoutPosition(pocEmit.stderr) || bytes(coldOut) !== bytes(pocOut)) {
     failures.push(`${file} [emit js, round ${round}]\n  cold ${coldEmit.code}: ${JSON.stringify(coldEmit.stderr).slice(0, 200)}\n  poc  ${pocEmit.code}: ${JSON.stringify(pocEmit.stderr).slice(0, 200)} artifact ${bytes(coldOut) === bytes(pocOut) ? "same" : "differs"}`);
   }
   fs.rmSync(coldOut, { force: true });

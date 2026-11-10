@@ -264,10 +264,23 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     );
   }
 
-  const rejected = (cause: unknown, details: Readonly<Record<string, unknown>>, checking = false): PocError =>
-    cause instanceof PocError
-      ? cause
-      : new PocError("COMPILER_REJECTED", Main.book_err(cause, checking), details, { cause });
+  // Every file the loader reaches, by the namespace its spans carry, so a
+  // rejection can name the file and position of the term it points at.
+  const sources = new Map<string, string>();
+  const reached = (real: string, namespace: string): void => {
+    sources.set(namespace, real);
+  };
+
+  const rejected = (cause: unknown, details: Readonly<Record<string, unknown>>, checking = false): PocError => {
+    if (cause instanceof PocError) {
+      return cause;
+    }
+    const message = Main.book_err(cause, checking);
+    const location = errorLocation(cause, sources);
+    return location === undefined
+      ? new PocError("COMPILER_REJECTED", message, details, { cause })
+      : new PocError("COMPILER_REJECTED", message + "\nAt: " + locationText(location), { ...details, location }, { cause });
+  };
 
   const emit = (book: BookLike, target: Target): string => {
     try {
@@ -300,6 +313,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
       const namespace = role === "entry" ? "" : moduleNamespace(entry);
       try {
         await Bend.book_load(Bend.book_nil(), entry, namespace, new Map(), undefined, undefined, (real, namespace, text) => {
+          reached(real, namespace);
           steps.push({ path: real, namespace, text });
           return true;
         });
@@ -328,6 +342,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
       const starts: number[] = [];
       try {
         await Bend.book_load(book, root, namespace, new Map(), undefined, undefined, (real, namespace, text) => {
+          reached(real, namespace);
           expectStep(steps[starts.length], real, namespace, text);
           starts.push(book.order.length);
           return false;
@@ -373,6 +388,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
           const skipped: string[] = [];
           let count = 0;
           await Bend.book_load(book, root, namespace, seen, undefined, undefined, (real, loaded, text) => {
+            reached(real, loaded);
             // Files before the group are already seen. The loader reaches the
             // group's files next, in order; later files are left unparsed
             // and forgotten, so the next group loads them.
@@ -444,6 +460,57 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     },
   };
   return runtime;
+}
+
+// A rejection's source position: the file of the term Bend's error points
+// at, its first character and its last, lines and columns from 1 (columns
+// count UTF-16 units, as Bend's spans do).
+export interface ErrorLocation {
+  readonly path: string;
+  readonly line: number;
+  readonly column: number;
+  readonly endLine: number;
+  readonly endColumn: number;
+}
+
+export function errorLocation(cause: unknown, sources: ReadonlyMap<string, string>): ErrorLocation | undefined {
+  if (typeof cause !== "object" || cause === null) {
+    return undefined;
+  }
+  const spn = (cause as { spn?: { file?: { str?: unknown; ns?: unknown }; beg?: unknown; end?: unknown } }).spn;
+  const file = spn?.file;
+  if ((cause as { $?: unknown }).$ !== "Err" || typeof file?.str !== "string" || typeof file.ns !== "string"
+    || typeof spn?.beg !== "number" || typeof spn.end !== "number") {
+    return undefined;
+  }
+  const real = sources.get(file.ns);
+  if (real === undefined) {
+    return undefined;
+  }
+  const str = file.str;
+  const at = (pos: number): [number, number] => {
+    const lead = str.slice(0, pos);
+    return [lead.split("\n").length, pos - lead.lastIndexOf("\n")];
+  };
+  const [line, column] = at(spn.beg);
+  const [endLine, endColumn] = at(Math.max(spn.beg, spn.end - 1));
+  const relative = path.relative(process.cwd(), real);
+  const shown = relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : real;
+  return { path: shown, line, column, endLine, endColumn };
+}
+
+export function locationText(location: ErrorLocation): string {
+  const end = location.endLine === location.line
+    ? (location.endColumn === location.column ? "" : "-" + String(location.endColumn))
+    : "-" + String(location.endLine) + ":" + String(location.endColumn);
+  return location.path + ":" + String(location.line) + ":" + String(location.column) + end;
+}
+
+// The checker's text without poc's position line: what cold equivalence
+// compares against the checker's CLI.
+const POSITION_LINE = /^At: .+:\d+:\d+(-\d+(:\d+)?)?$/;
+export function withoutPosition(text: string): string {
+  return text.split("\n").filter((line) => !POSITION_LINE.test(line)).join("\n");
 }
 
 // The checker must read exactly the files the keys were computed from.

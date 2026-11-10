@@ -1,6 +1,7 @@
 // Cold equivalence across incremental histories (SPEC-incremental-compilation.md,
 // Acceptance). Every step of every history is compared with the pinned
-// checker's CLI, byte for byte: `bend FILE --check-only` against `poc check`,
+// checker's CLI, byte for byte apart from poc's source position line after a
+// rejection: `bend FILE --check-only` against `poc check`,
 // and `bend FILE -o OUT.js` against `poc build` (stderr and artifact). The
 // cache persists across the steps of a history, and each step runs in a new
 // process, so every history is also a restart test.
@@ -10,6 +11,8 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+import { withoutPosition } from "../src/compiler.ts";
 
 const required = (name: string): string => {
   const value = process.env[name];
@@ -44,6 +47,13 @@ function run(cmd: string[], cwd: string, env: Record<string, string>): Run {
     stdout: child.stdout.toString(),
     stderr: child.stderr.toString(),
   };
+}
+
+// poc's own lines are its host's debug trace and, after a rejection, the
+// source position of the term the checker's error points at. The rest is
+// the checker's text, byte for byte.
+function checkerText(stderr: string): string {
+  return withoutPosition(stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n"));
 }
 
 // A project directory with its own cache and its own signer (key and
@@ -91,7 +101,7 @@ class History {
     const cold = run([bend, entry, "--check-only"], this.dir, {});
     const traced = this.poc(["check", entry], true);
     const trace = traced.stderr.split("\n").filter((line) => line.startsWith("[poc-host] ")).join("\n");
-    const poc = { ...traced, stderr: traced.stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n") };
+    const poc = { ...traced, stderr: checkerText(traced.stderr) };
     expect({ entry, code: poc.code, stdout: poc.stdout, stderr: poc.stderr })
       .toEqual({ entry, code: cold.code, stdout: cold.stdout, stderr: cold.stderr });
     if (cold.code === 0 && /^def main\b/m.test(fs.readFileSync(path.resolve(this.dir, entry), "utf8"))) {
@@ -101,7 +111,7 @@ class History {
       fs.rmSync(pocOut, { force: true });
       const coldEmit = run([bend, entry, "-o", coldOut], this.dir, {});
       const pocEmit = this.poc(["build", entry, "--output", pocOut, "--target", "js"]);
-      expect({ code: pocEmit.code, stderr: pocEmit.stderr }).toEqual({ code: coldEmit.code, stderr: coldEmit.stderr });
+      expect({ code: pocEmit.code, stderr: checkerText(pocEmit.stderr) }).toEqual({ code: coldEmit.code, stderr: coldEmit.stderr });
       expect(fs.readFileSync(pocOut, "utf8")).toBe(fs.readFileSync(coldOut, "utf8"));
     }
     return trace;
@@ -143,7 +153,7 @@ describe("incremental histories agree with cold checks", () => {
       const flags = allowUnsafe ? ["--allow-unsafe"] : [];
       const cold = run([bend, "E.bend", "--check-only", ...flags], h.dir, {});
       const result = h.poc(["check", ...flags, "E.bend"], true);
-      const stderr = result.stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n");
+      const stderr = checkerText(result.stderr);
       expect({ code: result.code, stdout: result.stdout, stderr }).toEqual(cold);
       return { ...result, stderr, trace: result.stderr };
     };
@@ -465,7 +475,8 @@ def main() -> IO(Unit):
     const bad = traced(["check", "--module", "Bad.bend"]);
     const cold = asImported("Bad.bend");
     expect(bad.code).toBe(1);
-    expect(bad.stderr.split("\n").filter((line) => !line.startsWith("[poc-host] ")).join("\n")).toBe(cold.stderr);
+    expect(bad.stderr).toContain("\nAt: Bad.bend:4:3-8\n");
+    expect(checkerText(bad.stderr)).toBe(cold.stderr);
   }, 900_000);
 });
 
