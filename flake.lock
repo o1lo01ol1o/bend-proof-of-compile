@@ -29,8 +29,8 @@
       },
       "original": {
         "owner": "o1lo01ol1o",
+        "ref": "main",
         "repo": "bend",
-        "rev": "e5a0bbcd4a7ecd219769b4629f305e47d17c3a7c",
         "type": "github"
       }
     },

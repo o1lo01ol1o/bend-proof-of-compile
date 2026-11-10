@@ -1,11 +1,12 @@
 # Handoff: bend-proof-of-compile
 
-## Status (2026-11-08): on upstream v2.0.40
+## Status (2026-11-10): on upstream v2.0.40
 
-poc runs on the fork's published series `poc/2.0.40` (tag
-`poc/2.0.40+poc.1`, `5158ac74`; `bend version` prints `2.0.40+poc.1`),
-pinned by revision in `flake.nix`; the version string is read from the
-pinned source. This branch is `bend-2.0.40` on GitHub. `nix build
+poc runs on the fork's `main`, which carries the poc series on v2.0.40 (tag
+`poc/2.0.40+poc.2`, `e5a0bbcd`; `bend version` prints `2.0.40+poc.2`).
+`flake.nix` tracks the fork's `main` and `flake.lock` holds the revision;
+the version string is read from the locked source. This branch is `main`
+on GitHub, and bend-categories tracks it. `nix build
 .#proof-of-compile` passes: 39 tests (codec, stored elaborations, runtime, SHA,
 acceptance histories against the fork's CLI) and the install check.
 
