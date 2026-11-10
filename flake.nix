@@ -9,9 +9,10 @@
     devenv.inputs.nixpkgs.follows = "nixpkgs";
 
     bend-src = {
-      # The fork's poc series on upstream v2.0.40 (tag poc/2.0.40+poc.2):
+      # The fork's poc series on upstream v2.0.40 (tag poc/2.0.40+poc.3):
       # checked-book API, Promise scheduler, report policy, alpha-congruence,
-      # error display under a normalization budget.
+      # error display under a normalization budget, C-lane type keys shared
+      # across lets, value defs stuck under an index heating no arguments.
       # Tracks the fork's main; flake.lock holds the revision, and
       # bend-categories follows this pin.
       url = "github:o1lo01ol1o/bend/main";

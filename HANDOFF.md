@@ -3,7 +3,7 @@
 ## Status (2026-11-10): on upstream v2.0.40
 
 poc runs on the fork's `main`, which carries the poc series on v2.0.40 (tag
-`poc/2.0.40+poc.2`, `e5a0bbcd`; `bend version` prints `2.0.40+poc.2`).
+`poc/2.0.40+poc.3`, `0e484745`; `bend version` prints `2.0.40+poc.3`).
 `flake.nix` tracks the fork's `main` and `flake.lock` holds the revision;
 the version string is read from the locked source. This branch is `main`
 on GitHub, and bend-categories tracks it. `nix build
