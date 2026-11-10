@@ -42,8 +42,9 @@ acceptance histories against the fork's CLI) and the install check.
   emission from a state restored through real packs; `test/codec.test.ts`
   pins both golden texts, that a check never reads the elaboration, and
   that an elaboration naming the wrong definitions is refused.
-- **Layered stores.** `POC_STORE` names the writable store (default
-  `$TMPDIR/bend-proof-of-compile/v4`, as before) and `POC_STORE_PATH`
+- **Layered stores.** `POC_STORE` names the writable store (else
+  `$POC_CAS_ROOT/bend-proof-of-compile/v5`, `POC_CAS_ROOT` absolute, as on
+  main since e7b4ab6; else `$TMPDIR/bend-proof-of-compile/v5`) and `POC_STORE_PATH`
   read-only stores searched after it; a Nix store path, or a `symlinkJoin`
   of several, is one layer. Writes, GC, verification and quarantine act on
   the writable store only; an invalid object in a layer is a miss. Keys name

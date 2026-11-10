@@ -124,12 +124,20 @@ let memoizedInputs:
 
 globalThis.POC_HOST = {
   cacheRoot(namespace, version) {
-    // The writable store: POC_STORE, or a directory under the temporary
-    // directory. Read-only layers (POC_STORE_PATH) are searched after it.
+    // The writable store: POC_STORE names it; else POC_CAS_ROOT names the
+    // directory it lives under; else the temporary directory does.
+    // POC_CAS_ROOT must be absolute: a relative one would make the store
+    // depend on the caller's cwd, silently splitting (or sharing) it.
+    // Read-only layers (POC_STORE_PATH) are searched after it.
     const configured = process.env.POC_STORE;
+    const parent = process.env.POC_CAS_ROOT;
+    if (parent !== undefined && parent.length > 0 && !path.isAbsolute(parent)) {
+      throw new Error(`POC_CAS_ROOT must be an absolute path, got: ${parent}`);
+    }
     const root = configured !== undefined && configured.length > 0
       ? path.resolve(configured)
-      : path.join(os.tmpdir(), safeSegment(namespace), safeSegment(version));
+      : path.join(parent !== undefined && parent.length > 0 ? parent : os.tmpdir(),
+        safeSegment(namespace), safeSegment(version));
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     // Integrity does not rest on who can write here: every object is signed,
     // and only objects signed by a trusted key are read (trust option (b)).
