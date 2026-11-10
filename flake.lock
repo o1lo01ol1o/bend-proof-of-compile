@@ -20,17 +20,17 @@
     "bend-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794131903,
-        "narHash": "sha256-7Pz6lqsUuOHSmWryljpP4xJQn7KzgtQRd5lb03fhMS8=",
+        "lastModified": 1794313853,
+        "narHash": "sha256-hGnT/fDoKX3qxNhF0iosDY9gBrfw+TD64fS/WQz7ihk=",
         "owner": "o1lo01ol1o",
         "repo": "bend",
-        "rev": "5158ac7442425ec44dd8f77cb5ce11060ea507e2",
+        "rev": "e5a0bbcd4a7ecd219769b4629f305e47d17c3a7c",
         "type": "github"
       },
       "original": {
         "owner": "o1lo01ol1o",
         "repo": "bend",
-        "rev": "5158ac7442425ec44dd8f77cb5ce11060ea507e2",
+        "rev": "e5a0bbcd4a7ecd219769b4629f305e47d17c3a7c",
         "type": "github"
       }
     },

@@ -9,10 +9,11 @@
     devenv.inputs.nixpkgs.follows = "nixpkgs";
 
     bend-src = {
-      # The fork's poc series on upstream v2.0.40 (tag poc/2.0.40+poc.1):
-      # checked-book API, Promise scheduler, report policy, alpha-congruence.
+      # The fork's poc series on upstream v2.0.40 (tag poc/2.0.40+poc.2):
+      # checked-book API, Promise scheduler, report policy, alpha-congruence,
+      # error display under a normalization budget.
       # Pinned by revision; bend-categories follows this pin.
-      url = "github:o1lo01ol1o/bend/5158ac7442425ec44dd8f77cb5ce11060ea507e2";
+      url = "github:o1lo01ol1o/bend/e5a0bbcd4a7ecd219769b4629f305e47d17c3a7c";
       flake = false;
     };
 
