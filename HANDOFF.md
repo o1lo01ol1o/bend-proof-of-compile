@@ -53,7 +53,7 @@ acceptance histories against the fork's CLI) and the install check.
   paths (in Nix: the same source store path). The acceptance test "a
   read-only store layer serves states and artifacts" pins this; trust is
   unchanged (signatures against the reader's trusted keys), pending D9 in
-  `SPEC-persistent-artifacts.md`.
+  `docs/SPEC-persistent-artifacts.md`.
 - **`poc plan [--module] FILE`** prints the load order a chain of boundaries
   follows, one step per line as `namespace<TAB>realpath`, Base first and the
   entry last; a flake materializes it (committed, checked for drift) to
@@ -68,7 +68,7 @@ acceptance histories against the fork's CLI) and the install check.
   only its own entry, and its artifact is `bend -o`'s byte for byte. A
   dependency must be a hub package (`0x<pkg>/…` under `BEND_LIB`): hub
   namespaces are entry-independent, relative ones are not. Reuse is per
-  package pin and along load-order prefixes (`SPEC-persistent-artifacts.md`,
+  package pin and along load-order prefixes (`docs/SPEC-persistent-artifacts.md`,
   "Nix composition").
 - **Constructor datatypes.** Packs keep `Ctr.f` (2.0.40, bendlang/bend
   #2053); without it a type error over a restored prefix crashed in
