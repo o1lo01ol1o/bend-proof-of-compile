@@ -13,7 +13,7 @@ on GitHub, and bend-categories tracks it. `nix build
 .#proof-of-compile` passes: 39 tests (codec, stored elaborations, runtime, SHA,
 acceptance histories against the fork's CLI) and the install check.
 
-- **Stored elaborations (pack schema 8, CAS schema 5, cache `v5`).** A
+- **Stored elaborations (pack schema 9, CAS schema 5, cache `v5`).** A
   state object has two payloads under one key and one signature: the state
   (`state.bin`: records, summaries, order, sources; each record's lowered
   type and value travel as one compressed blob, inflated on the record's
@@ -61,6 +61,15 @@ acceptance histories against the fork's CLI) and the install check.
   follows, one step per line as `namespace<TAB>realpath`, Base first and the
   entry last; a flake materializes it (committed, checked for drift) to
   define one derivation per dependency region without import-from-derivation.
+- **Pack schema 9: a def keeps its module's namespace (`m`).** A foreign
+  def's C names ids as `CID(k)`, which the emitter resolves in the def's
+  own module (comp.ts `c_ids`); schema 8 dropped `m`, so C emitted from a
+  restored state looked `k` up bare and died ("CID(tick) names no
+  constructor or def"). A check and `bend -o` never restore, which is why
+  only a restored emit (poc build after a check, bend-tauri-poly's prefix
+  packs) met it. Schema 8 packs are refused, so they are checked again.
+  Test: "C from a restored state: a module's foreign C names its own
+  module's ids".
 - **Every error of the failing file.** The fork's checker no longer stops
   at the first error: `book_check` (main.ts, over `book_valid`'s `past`
   hook; the CLI and poc both call it) goes on to the end of that error's

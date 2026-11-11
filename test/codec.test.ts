@@ -47,7 +47,7 @@ async function checkFixture(): Promise<Sealed[]> {
 const abstract = (wire: string): string => wire.split(fixture).join(DIR);
 const concrete = (wire: string): string => wire.split(DIR).join(fixture);
 const goldenFile = (index: number, part: keyof PackWire): string =>
-  path.join(golden, part === "state" ? `pack-v8-${index}.json` : `pack-v8-${index}.elaboration.json`);
+  path.join(golden, part === "state" ? `pack-v9-${index}.json` : `pack-v9-${index}.elaboration.json`);
 const decode = (wire: PackWire) => decodePackWire(runtime, wire.state, () => wire.elaboration);
 
 describe("packs", async () => {

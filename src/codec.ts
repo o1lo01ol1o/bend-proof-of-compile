@@ -18,7 +18,7 @@ import type {
 import { StoredTerms, TermTable } from "./term-table.ts";
 import { PocError } from "./error.ts";
 
-const PACK_SCHEMA = 8;
+const PACK_SCHEMA = 9;
 
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;
@@ -57,6 +57,9 @@ interface WireDefinition {
   readonly u?: boolean;
   readonly l?: boolean;
   readonly i?: readonly string[];
+  // The declaring module's namespace (schema 9): a foreign def's C resolves
+  // its CID(k) and FID(k) in it, so a restored one emits as a checked one.
+  readonly m?: string;
 }
 
 interface WireConstructor {
@@ -646,6 +649,7 @@ function encodeTopLevel(
     ...(tld.u === undefined ? {} : { u: tld.u }),
     ...(tld.l === undefined ? {} : { l: tld.l }),
     ...(tld.i === undefined ? {} : { i: tld.i.map(pathReal) }),
+    ...(tld.m === undefined ? {} : { m: tld.m }),
   };
 }
 
@@ -747,6 +751,9 @@ function decodeTopLevel(
     assignOptionalBoolean(definition, "l", raw.l, `${location}.l`);
     if (raw.i !== undefined) {
       definition.i = stringArray(raw.i, `${location}.i`);
+    }
+    if (raw.m !== undefined) {
+      definition.m = string(raw.m, `${location}.m`);
     }
     if (definition.v !== null) {
       // The body is restored from the pack's elaboration on first read.

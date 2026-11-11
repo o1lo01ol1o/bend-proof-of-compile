@@ -50,6 +50,9 @@ export interface DefinitionLike {
   u?: boolean;
   l?: boolean;
   i?: string[];
+  // The namespace of the module that declared it: a foreign def's C names
+  // its own module's ids through it (comp.ts c_ids).
+  m?: string;
 }
 
 export type TopLevelLike = AdtLike | DefinitionLike;

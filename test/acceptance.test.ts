@@ -502,6 +502,51 @@ src/Lib.bend
     expect(missing.stderr).toContain("no definition nowhere in src/Main.bend");
   }, 900_000);
 
+  test("C from a restored state: a module's foreign C names its own module's ids", () => {
+    const h = new History();
+    // tick's C resolves CID(tick) and CID(tock) in M's namespace, which a
+    // restored record must keep (pack schema 9); tock is never called.
+    h.write("M.bend", `import Base
+
+def tick(n: U32) -> IO(U32):
+  import "./tick.c"
+
+def tock(n: U32) -> IO(U32):
+  import "./tick.c"
+`);
+    h.write("tick.c", `static Term tick_run(Env e, Term* f, IoWork* w) {
+  return f[0];
+}
+
+static void __attribute__((constructor)) tick_use(void) {
+#ifdef CID(tick)
+  io_eff(CID(tick), tick_run);
+#endif
+#ifdef CID(tock)
+  io_eff(CID(tock), tick_run);
+#endif
+}
+`);
+    h.write("E.bend", `import Base
+import ./M.bend as M
+
+def main() -> IO(Unit):
+  do IO<Unit>:
+    v : U32 <- M.tick(7)
+    IO.print(U32.show(v))
+`);
+    // The check commits the final state (its verdict refuses the foreign
+    // code); the build then emits from that state, restored.
+    expect(h.poc(["check", "--allow-unsafe", "E.bend"]).stderr).toContain("rely on unsafe or foreign code");
+    const coldOut = path.join(h.cache, "cold.c");
+    const pocOut = path.join(h.cache, "poc.c");
+    const cold = run([bend, "E.bend", "-o", coldOut], h.dir, {});
+    const built = h.poc(["build", "E.bend", "--output", pocOut, "--target", "c"], true);
+    expect(built.stderr).not.toContain("bookCheck");
+    expect({ code: built.code, stderr: checkerText(built.stderr) }).toEqual({ code: cold.code, stderr: cold.stderr });
+    expect(fs.readFileSync(pocOut, "utf8")).toBe(fs.readFileSync(coldOut, "utf8"));
+  }, 900_000);
+
   test("signed states: forgeries are quarantined, untrusted signers are misses", () => {
     const h = new History();
     h.write("P.bend", P);
