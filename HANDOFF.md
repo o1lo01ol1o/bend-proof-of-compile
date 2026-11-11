@@ -3,7 +3,7 @@
 ## Status (2026-11-11): on upstream v2.0.40
 
 poc runs on the fork's `main`, which carries the poc series on v2.0.40 (tag
-`poc/2.0.40+poc.5`, `53ee3579`; `bend version` prints `2.0.40+poc.5`).
+`poc/2.0.40+poc.6`, `3d725059`; `bend version` prints `2.0.40+poc.6`).
 `bend` and `poc` run on a 64 MB stack (`ulimit -s` plus
 `BUN_JSC_maxPerThreadStackUsage`): the C lane recurses once per element of
 a list literal.
