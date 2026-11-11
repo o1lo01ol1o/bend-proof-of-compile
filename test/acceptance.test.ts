@@ -144,6 +144,67 @@ def main() -> IO(Unit):
   IO.print("${message} " ++ Nat.show(R.middle()))
 `;
 
+// A project for `poc unreached`: a live chain through a template instance
+// and a constructor, a dead def, type and law, a law about live code with a
+// helper only it uses, an unreached def in the entry and an unloaded file.
+const LIB = `import Base
+
+type Shape is Data:
+  Dot{}
+  Box{n: Nat}
+
+type Unused is Data:
+  Nope{}
+
+def double(+n: Nat) -> Nat:
+  Nat.add(n, n)
+
+def triple(+n: Nat) -> Nat:
+  Nat.add(n, Nat.add(n, n))
+
+def scale(~k: Nat, n: Nat) -> Nat:
+  Nat.mul(k, n)
+
+def size(s: Shape) -> Nat:
+  match s:
+    case Dot{}:
+      0n
+    case Box{n}:
+      n
+
+def two() -> Nat:
+  2n
+
+law double_two:
+  {double(1n) == two() : Nat}
+
+def double_two(): {==}
+
+law triple_one:
+  {triple(1n) == 3n : Nat}
+
+def triple_one(): {==}
+`;
+
+const MAIN = `import Base
+import ./Lib.bend as L
+
+def go(+n: Nat) -> Nat:
+  Nat.add(L.double(n), L.scale(3n, L.size(L.Box{n})))
+
+def spare(n: Nat) -> Nat:
+  n
+
+def main() -> Nat:
+  go(2n)
+`;
+
+const EXTRA = `import Base
+
+def orphan() -> Nat:
+  1n
+`;
+
 describe("incremental histories agree with cold checks", () => {
   test("explicit unsafe checking preserves strict certification across restored states", () => {
     const h = new History();
@@ -382,6 +443,64 @@ def main() -> IO(Unit):
     expect(module.stdout.trimEnd().split("\n").slice(1)).toEqual([`P\t${dir}/P.bend`, `M\t${dir}/M.bend`]);
     expect(h.poc(["plan"]).code).not.toBe(0);
   }, 120_000);
+
+  test("every independent error of the failing file, cold and resumed, and none past it", () => {
+    const h = new History();
+    h.write("P.bend", P);
+    // Two independent errors in M (the fill of Q.L and other); middle names
+    // the failed fill, so it is not checked; E's error is never reached.
+    h.write("M.bend", M('"not a Nat"') + `
+def other() -> U32:
+  5n
+`);
+    h.write("E.bend", E("one") + `
+def broken() -> Nat:
+  "never checked"
+`);
+    for (let round = 0; round < 2; round += 1) {
+      h.agree("E.bend");
+      const checked = h.poc(["check", "E.bend"]);
+      expect(checked.code).not.toBe(0);
+      expect(checked.stderr).toContain("Found 2 errors. 1 def that names a failed def was not checked.");
+      expect(checked.stderr.match(/^At: M\.bend:\d+:\d+/gm)?.length).toBe(2);
+      expect(checked.stderr).not.toContain("broken");
+    }
+  }, 900_000);
+
+  test("unreached: the definitions under a directory a def does not reach", () => {
+    const h = new History();
+    h.write("src/Lib.bend", LIB);
+    h.write("src/Main.bend", MAIN);
+    h.write("src/sub/Extra.bend", EXTRA);
+    const report = `unreached from main: 4 of 12 definitions under src
+src/Lib.bend
+  type Unused
+  def triple
+  law triple_one
+src/Main.bend
+  def spare
+not loaded by src/Main.bend:
+  src/sub/Extra.bend
+reached only by laws about reached code:
+src/Lib.bend
+  def two (kept by law double_two)
+`;
+    const cold = h.poc(["unreached", "src/Main.bend", "main", "src"], true);
+    expect({ code: cold.code, stdout: cold.stdout }).toEqual({ code: 0, stdout: report });
+    expect(cold.stderr).toContain("bookCheck");
+    // A second run reads the stored state: nothing is checked again.
+    const warm = h.poc(["unreached", "src/Main.bend", "main", "src"], true);
+    expect({ code: warm.code, stdout: warm.stdout }).toEqual({ code: 0, stdout: report });
+    expect(warm.stderr).not.toContain("bookCheck");
+    // As a module, the def is spelled as the module spells it.
+    const module = h.poc(["unreached", "--module", "src/Lib.bend", "double", "src"]);
+    expect(module.code).toBe(0);
+    expect(module.stdout).toContain("def triple");
+    expect(module.stdout).toContain("src/Main.bend");
+    const missing = h.poc(["unreached", "src/Main.bend", "nowhere", "src"]);
+    expect(missing.code).not.toBe(0);
+    expect(missing.stderr).toContain("no definition nowhere in src/Main.bend");
+  }, 900_000);
 
   test("signed states: forgeries are quarantined, untrusted signers are misses", () => {
     const h = new History();

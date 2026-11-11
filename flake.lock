@@ -20,11 +20,11 @@
     "bend-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794403716,
-        "narHash": "sha256-HJOEMynIs8UPADKYhDv+gMxsiV3vuuaujAVIHMeo1t0=",
+        "lastModified": 1794421355,
+        "narHash": "sha256-VEzCsKoJGXfJliavKLJSXmLvui3fcFdBQTUWawUD0eM=",
         "owner": "o1lo01ol1o",
         "repo": "bend",
-        "rev": "3d725059875505f851922eed112dceb971a8a9aa",
+        "rev": "d2523d1615e0361d10de75c712c62ac03aa0c213",
         "type": "github"
       },
       "original": {

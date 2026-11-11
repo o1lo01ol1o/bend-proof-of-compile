@@ -15,7 +15,8 @@
       # across lets, value defs stuck under an index heating no arguments,
       # C-lane CIDs for matched datatypes, raw u32 words in boxed slots,
       # wide continuation frames boxed, upstream #2107's bit-trie fix,
-      # resolved import paths whose segments start with a digit.
+      # resolved import paths whose segments start with a digit, every
+      # independent error of the first failing file (book_check).
       # Tracks the fork's main; flake.lock holds the revision, and
       # bend-categories follows this pin.
       url = "github:o1lo01ol1o/bend/main";

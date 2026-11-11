@@ -190,6 +190,20 @@ def Host.artifact_build(
   import "../foreign/host.c"
   import "../foreign/host.js"
 
+# The definitions in the .bend files under `dir` that `start` (a def, as the root
+# file spells it) does not reach in a checked state, and the files there the
+# load order `steps` never loads, as a report. The reach follows the names
+# each checked record's type and body refer to, read from the state without
+# raising a record.
+def Host.state_unreached(
+  state: Checkpoint,
+  steps: List<&2, LoadStep>,
+  start: String,
+  dir: String
+) -> IO(Result<&2, &2, String, String>):
+  import "../foreign/host.c"
+  import "../foreign/host.js"
+
 # Retention. A build records the keys it keeps alive (its final state, and
 # its artifact when it emits) under a root named by Bend; `roots_live` is the
 # union of every recorded root.

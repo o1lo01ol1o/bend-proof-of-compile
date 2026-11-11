@@ -5,6 +5,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { decodePack, encodePack, pathReal, type PackBytes } from "./codec.ts";
+import { unreachedReport } from "./unreached.ts";
 import {
   CAS_SCHEMA,
   reloadTrust,
@@ -103,6 +104,7 @@ interface HostApi {
     state: HeldState,
     reliant: readonly string[],
   ): void;
+  stateUnreached(state: HeldState, steps: readonly LoadStep[], start: string, dir: string): string;
   rootsPut(cache: string, root: string, live: readonly string[]): void;
   rootsLive(cache: string): readonly string[];
   cacheStatus(cache: string): object;
@@ -286,6 +288,10 @@ globalThis.POC_HOST = {
     const payload = Buffer.from(source, "utf8");
     putCasObjects([{ cache, key, payload, entry: { kind: "artifact", reliant } }]);
     atomicWrite(path.resolve(output), payload);
+  },
+
+  stateUnreached(state, steps, start, dir) {
+    return unreachedReport(runtime, state.book, steps, start, dir);
   },
 
   cacheStatus(cache) {

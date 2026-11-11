@@ -108,13 +108,14 @@ export type BookReport =
 interface MainModule {
   book_report(book: BookLike, read?: (key: string) => BookRecord | undefined,
     policy?: "proof" | "allow-unsafe"): BookReport;
-  book_err(error: unknown, checking?: boolean): string;
+  book_err(error: unknown, checking?: boolean, at?: (error: unknown) => string | undefined): string;
   book_read(
     file: string,
     unsafeSeed?: BookStateLike,
     on?: LoadHook,
   ): Promise<CheckedBookStateLike>;
   book_over(parent: BookLike): BookLike;
+  book_check(book: BookLike, done?: number): void;
   book_flat(book: BookLike): BookLike;
 }
 
@@ -247,6 +248,7 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     typeof Bend.term_higher !== "function" ||
     typeof Main.book_read !== "function" ||
     typeof Main.book_over !== "function" ||
+    typeof Main.book_check !== "function" ||
     typeof Main.book_flat !== "function" ||
     typeof Main.book_report !== "function" ||
     typeof Main.book_err !== "function" ||
@@ -275,11 +277,20 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
     if (cause instanceof PocError) {
       return cause;
     }
-    const message = Main.book_err(cause, checking);
-    const location = errorLocation(cause, sources);
-    return location === undefined
+    // The checker renders its errors (every independent error of the file
+    // that failed); poc adds each one's source position after it.
+    const locations: ErrorLocation[] = [];
+    const message = Main.book_err(cause, checking, (error) => {
+      const location = errorLocation(error, sources);
+      if (location === undefined) {
+        return undefined;
+      }
+      locations.push(location);
+      return "At: " + locationText(location);
+    });
+    return locations.length === 0
       ? new PocError("COMPILER_REJECTED", message, details, { cause })
-      : new PocError("COMPILER_REJECTED", message + "\nAt: " + locationText(location), { ...details, location }, { cause });
+      : new PocError("COMPILER_REJECTED", message, { ...details, location: locations[0], locations }, { cause });
   };
 
   const emit = (book: BookLike, target: Target): string => {
@@ -407,7 +418,9 @@ export async function loadCompiler(bend2Source: string): Promise<CompilerRuntime
           for (const real of skipped) {
             seen.delete(real);
           }
-          Bend.book_valid(book, done);
+          // Every independent error of the first file that fails, as the
+          // checker's CLI reports them.
+          Main.book_check(book, done);
           const child = { book, seen: new Map(seen) };
           seal(group.key, parent, child, last);
           parent = child;

@@ -240,6 +240,15 @@ function host_artifact_build(cache, key, output, target, state, reliant) {
   });
 }
 
+function host_state_unreached(state, steps, start, dir) {
+  return poc_try(() => poc_host().stateUnreached(
+    state.token,
+    poc_list_to_array(steps).map(poc_step_from_bend),
+    start,
+    dir,
+  ));
+}
+
 function host_roots_put(cache, root, live) {
   return poc_try(() => {
     poc_host().rootsPut(cache, root, poc_list_to_array(live));
@@ -278,6 +287,7 @@ io_eff(CID(Host.book_check), host_book_check);
 io_eff(CID(Host.output_path), host_output_path);
 io_eff(CID(Host.artifact_restore), host_artifact_restore);
 io_eff(CID(Host.output_remove), host_output_remove);
+io_eff(CID(Host.state_unreached), host_state_unreached);
 io_eff(CID(Host.artifact_build), host_artifact_build);
 io_eff(CID(Host.roots_put), host_roots_put);
 io_eff(CID(Host.roots_live), host_roots_live);

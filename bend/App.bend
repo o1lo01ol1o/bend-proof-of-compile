@@ -33,10 +33,16 @@ def App.compiler_key(inputs: H.CompilerInputs) -> M.Digest:
 type Emission is Data:
   Emission{output: String, target: String}
 
+# What `poc unreached` asks: the def the reach starts from, as its file
+# spells it, and the directory whose definitions are reported.
+type Reach is Data:
+  Reach{start: String, dir: String}
+
 type Mode is Data:
   Checking{}
   CheckingUnsafe{}
   Emitting{emission: Emission}
+  Reaching{reach: Reach}
 
 # One build's fixed context.
 type Build is Data:
@@ -413,6 +419,18 @@ def App.todos.plural(+todos: Nat, zero: Bool) -> Maybe<&2, String>:
 def App.todos(+todos: Nat) -> Maybe<&2, String>:
   App.todos.plural(todos, Nat.is_eq(todos, 0n))
 
+# A reach reads the checked state, whatever its verdict: holes do not stop it.
+def App.todos.mode(mode: Mode, +todos: Nat) -> Maybe<&2, String>:
+  match mode:
+    case Reaching{reach}:
+      None{}
+    case Checking{}:
+      App.todos(todos)
+    case CheckingUnsafe{}:
+      App.todos(todos)
+    case Emitting{emission}:
+      App.todos(todos)
+
 # The checker refuses to write over a file the program reads (a loaded file
 # or a foreign file its records name), or a directory.
 def App.named(+path: String, files: List<&2, H.NamedBytes>) -> Bool:
@@ -550,6 +568,8 @@ def App.purpose(mode: Mode) -> String:
       "check"
     case Emitting{Emission{output, target}}:
       target
+    case Reaching{reach}:
+      "check"
 
 # A file checked as a module keeps its own root: its state is not the entry's.
 def App.purpose.role(role: H.Role, +purpose: String) -> String:
@@ -687,6 +707,33 @@ def App.emit(
     )
     App.emit.foreigns(build, emission, order, final, state, reliant, found)
 
+# Unreached code
+# --------------
+#
+# `poc unreached [--module] FILE DEF DIR` checks FILE as `poc check` does
+# (through the cache), then reports the definitions in the .bend files under
+# DIR that DEF does not reach, and the files there FILE never loads. The host
+# reads the reach off the checked state's stored references.
+
+def App.reach.done(result: Result<&2, &2, String, String>) -> IO(Unit):
+  match result:
+    case Fail{error}:
+      App.fail(error)
+    case Done{report}:
+      IO.print(report)
+
+def App.reach(+order: H.LoadOrder, state: H.Checkpoint, reach: Reach) -> IO(Unit):
+  match reach:
+    case Reach{start, dir}:
+      do IO<Unit>:
+        result : Result<&2, &2, String, String> <- H.Host.state_unreached(
+          state,
+          List.append(&2, H.LoadStep, App.order.imports(order), App.order.entry(order) <> Nil{}),
+          start,
+          dir
+        )
+        App.reach.done(result)
+
 def App.accepted(
   +build: Build,
   +order: H.LoadOrder,
@@ -704,6 +751,8 @@ def App.accepted(
       App.report(unsafe_report)
     case Emitting{emission}:
       App.emit(build, emission, order, final, state, reliant)
+    case Reaching{reach}:
+      App.reach(order, state, reach)
 
 def App.judged.todos(
   +build: Build,
@@ -734,7 +783,7 @@ def App.judged(
     case H.Verdict{+todos, reliant, report, unsafe_report}:
       do IO<Unit>:
         App.keep(build, order, M.Digest.hex(final) <> Nil{})
-        App.judged.todos(build, order, final, state, reliant, report, unsafe_report, App.todos(todos))
+        App.judged.todos(build, order, final, state, reliant, report, unsafe_report, App.todos.mode(App.mode(build), todos))
 
 # Newly checked states stay provisional until the load order is observed
 # again, unchanged, so an input race cannot poison a content-addressed state.
@@ -1074,6 +1123,8 @@ def App.ordered(
       App.state_get(build, order, latest, final)
     case CheckingUnsafe{}:
       App.state_get(build, order, latest, final)
+    case Reaching{reach}:
+      App.state_get(build, order, latest, final)
     case Emitting{emission}:
       do IO<Unit>:
         found : Result<&2, &2, String, Maybe<&2, List<&2, H.NamedBytes>>> <- H.Host.state_foreigns(
@@ -1222,6 +1273,10 @@ def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
       App.build(entry, H.AsModule{}, cache, Checking{})
     case "check" <> entry <> Nil{}:
       App.build(entry, H.AsEntry{}, cache, Checking{})
+    case "unreached" <> "--module" <> entry <> start <> dir <> Nil{}:
+      App.build(entry, H.AsModule{}, cache, Reaching{Reach{start, dir}})
+    case "unreached" <> entry <> start <> dir <> Nil{}:
+      App.build(entry, H.AsEntry{}, cache, Reaching{Reach{start, dir}})
     case "plan" <> "--module" <> entry <> Nil{}:
       App.plan(entry, H.AsModule{})
     case "plan" <> entry <> Nil{}:
@@ -1236,7 +1291,7 @@ def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
       Cli.gc(cache)
     case _:
       App.fail(
-        "usage: poc check [--module] [--allow-unsafe] FILE | poc plan [--module] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
+        "usage: poc check [--module] [--allow-unsafe] FILE | poc unreached [--module] FILE DEF DIR | poc plan [--module] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
       )
 
 def Cli.cached(args: List<&1, String>, cache: Result<&2, &2, String, String>) -> IO(Unit):

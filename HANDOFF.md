@@ -61,6 +61,25 @@ acceptance histories against the fork's CLI) and the install check.
   follows, one step per line as `namespace<TAB>realpath`, Base first and the
   entry last; a flake materializes it (committed, checked for drift) to
   define one derivation per dependency region without import-from-derivation.
+- **Every error of the failing file.** The fork's checker no longer stops
+  at the first error: `book_check` (main.ts, over `book_valid`'s `past`
+  hook; the CLI and poc both call it) goes on to the end of that error's
+  file, and no further, so nothing past it is elaborated. A failed def turns
+  opaque, and a def whose parsed terms name a failed one is skipped (and
+  counted), so each error reported is independent. One error prints as
+  before; more print in order, each with poc's `At:` line after it, then
+  `Found N errors.` (`book_err`'s `at` places the lines, so poc and
+  `bend --check-only` still agree byte for byte). Parse errors still stop at
+  the first.
+- **`poc unreached [--module] FILE DEF DIR`** checks FILE as `poc check`
+  does (through the cache, whatever the verdict: holes, `@unsafe` and
+  foreign code are fine), then lists the definitions in the `.bend` files
+  under DIR that DEF does not reach, the files there FILE never loads, and,
+  apart, what only laws about reached code keep alive. The reach follows each
+  record's stored references (`src/unreached.ts`), so it sees what
+  elaboration resolved and raises no record: on the suite's Trading plugin
+  (451 definitions) it is 103 s cold and 1.3 s warm. A program with several
+  entry points (a plugin's `main` and `start`) needs one run per entry.
 - **Composition as derivations** (`nix/composition.nix`, `lib.composition
   { pkgs, poc }`). `chain` makes one derivation per region of a load order:
   each checks a synthetic entry importing the hub modules of every region up
@@ -166,7 +185,8 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   chain and its points; sealing (F5) and grouped check plans; the verdicts
   (PROOF.bend rule, TODO count, the report text, the output rule) with the
   checker's own texts; stability by comparing a second walk's observations;
-  GC roots; the CLI (`check [--module]`, `build`, `cache status|verify|gc`).
+  GC roots; the CLI (`check [--module]`, `unreached [--module]`, `plan`,
+  `build`, `cache status|verify|gc`).
   `check --module FILE` loads FILE as a sibling importer does (namespace
   `X` for `X.bend`), so checking modules bottom-up leaves exactly the
   prefixes their importers resume from; plain `check FILE` loads it as the
@@ -190,11 +210,14 @@ semantics (catamorphism/initial-algebra structure of the Merkle keys), and is
   state's parent pack and its chain's foreign files; an artifact's report);
   quarantine on corruption; stages published parents first after Bend's
   stability check; GC roots and reachability GC.
+- `src/unreached.ts` — `poc unreached`'s report over a checked state: the
+  reach from a def along stored references, laws kept by reached code, and
+  the `.bend` files under a directory the load order never loads.
 - `src/compiler.ts` — drives the pinned checker in process: `loadSteps`
   (traversal-only walk; on a walk error, the cold load's error), `loadFills`
   (parse-only load; laws filled late, with their foreign/`@unsafe` flags),
   `check` (each group in a `book_over` child, later files skipped by `on` and
-  forgotten, then `book_valid`), `verdict` (TODO count and Bend's canonical
+  forgotten, then `book_check`), `verdict` (TODO count and Bend's canonical
   `book_report` over lazy summaries of the whole checked book),
   `emit`, `emitRestored`, and the checker's error rendering (`book_err`).
   Restored emission first calls Bend's `Comp.prepare_book(book, target)` to
@@ -377,6 +400,7 @@ POC_BEND2_SOURCE="$BEND2_SRC" \
 POC_HASHES_SOURCE=$(realpath vendor/bend-hashes) \
 bun src/cli.ts check path/to/Main.bend
 bun src/cli.ts check --module path/to/Lemmas1.bend   # as its importers load it
+bun src/cli.ts unreached path/to/Main.bend main path/to/src   # what main does not reach
 bun src/cli.ts build path/to/Main.bend --output out.js --target js
 bun src/cli.ts cache status|verify|gc
 
