@@ -87,6 +87,17 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          # Bend's compiler recurses once per element of a list literal, and
+          # a few thousand elements overflow the default 8 MB stack. Both
+          # wrappers raise the soft limit to 64 MB (or the hard limit, if it
+          # is lower) and let JSC use it; JSC still stops at the real bound.
+          bigStack = nixpkgs.lib.escapeShellArgs [
+            "--run"
+            "ulimit -s 65520 2>/dev/null || ulimit -s \"$(ulimit -H -s)\" 2>/dev/null || true"
+            "--set-default"
+            "BUN_JSC_maxPerThreadStackUsage"
+            "62914560"
+          ];
           bend = pkgs.stdenvNoCC.mkDerivation {
             pname = "bend";
             version = "${bendVersion}-unstable";
@@ -101,7 +112,7 @@
               mkdir -p "$out/bin" "$out/share/bend"
               cp -R bend2 guide "$out/share/bend/"
               makeWrapper ${pkgs.bun}/bin/bun "$out/bin/bend" \
-                --add-flags "$out/share/bend/bend2/main.ts" \
+                --add-flags "$out/share/bend/bend2/main.ts" ${bigStack} \
                 --prefix PATH : ${nixpkgs.lib.makeBinPath [ pkgs.clang ]}
 
               runHook postInstall
@@ -192,7 +203,7 @@
               cp -R src "$app/src"
               cp dist/app.js "$app/app.js"
               makeWrapper ${pkgs.bun}/bin/bun "$out/bin/proof-of-compile" \
-                --add-flags "$app/src/cli.ts" \
+                --add-flags "$app/src/cli.ts" ${bigStack} \
                 --set POC_APP_JS "$app/app.js" \
                 --set POC_BEND2_SOURCE ${bend}/share/bend/bend2 \
                 --set POC_HASHES_SOURCE ${bendHashes}/share/bend/hashes
