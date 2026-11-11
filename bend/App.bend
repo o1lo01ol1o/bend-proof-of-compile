@@ -33,8 +33,9 @@ def App.compiler_key(inputs: H.CompilerInputs) -> M.Digest:
 type Emission is Data:
   Emission{output: String, target: String}
 
-# What `poc unreached` asks: the def the reach starts from, as its file
-# spells it, and the directory whose definitions are reported.
+# What `poc unreached` asks: the defs the reach starts from, as their file
+# spells them (one, or a comma-separated list: a program's roots), and the
+# directory whose definitions are reported.
 type Reach is Data:
   Reach{start: String, dir: String}
 
@@ -710,9 +711,9 @@ def App.emit(
 # Unreached code
 # --------------
 #
-# `poc unreached [--module] FILE DEF DIR` checks FILE as `poc check` does
-# (through the cache), then reports the definitions in the .bend files under
-# DIR that DEF does not reach, and the files there FILE never loads. The host
+# `poc unreached [--module] FILE DEF[,DEF...] DIR` checks FILE as `poc check`
+# does (through the cache), then reports the definitions in the .bend files
+# under DIR that the DEFs do not reach, and the files there FILE never loads. The host
 # reads the reach off the checked state's stored references.
 
 def App.reach.done(result: Result<&2, &2, String, String>) -> IO(Unit):
@@ -1291,7 +1292,7 @@ def Cli.run(args: List<&1, String>, +cache: String) -> IO(Unit):
       Cli.gc(cache)
     case _:
       App.fail(
-        "usage: poc check [--module] [--allow-unsafe] FILE | poc unreached [--module] FILE DEF DIR | poc plan [--module] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
+        "usage: poc check [--module] [--allow-unsafe] FILE | poc unreached [--module] FILE DEF[,DEF...] DIR | poc plan [--module] FILE | poc build ENTRY [--target js|c] [--output FILE] | poc cache status|verify|gc"
       )
 
 def Cli.cached(args: List<&1, String>, cache: Result<&2, &2, String, String>) -> IO(Unit):

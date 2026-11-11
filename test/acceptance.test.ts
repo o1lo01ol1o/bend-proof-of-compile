@@ -492,6 +492,11 @@ src/Lib.bend
     const warm = h.poc(["unreached", "src/Main.bend", "main", "src"], true);
     expect({ code: warm.code, stdout: warm.stdout }).toEqual({ code: 0, stdout: report });
     expect(warm.stderr).not.toContain("bookCheck");
+    // Several roots, as a program has (a plugin's effect, plugin, start).
+    const roots = h.poc(["unreached", "src/Main.bend", "main,spare", "src"]);
+    expect(roots.code).toBe(0);
+    expect(roots.stdout).toStartWith("unreached from main, spare: 3 of 12 definitions under src\n");
+    expect(roots.stdout).not.toContain("def spare");
     // As a module, the def is spelled as the module spells it.
     const module = h.poc(["unreached", "--module", "src/Lib.bend", "double", "src"]);
     expect(module.code).toBe(0);
@@ -500,6 +505,9 @@ src/Lib.bend
     const missing = h.poc(["unreached", "src/Main.bend", "nowhere", "src"]);
     expect(missing.code).not.toBe(0);
     expect(missing.stderr).toContain("no definition nowhere in src/Main.bend");
+    const oneMissing = h.poc(["unreached", "src/Main.bend", "main,nowhere", "src"]);
+    expect(oneMissing.code).not.toBe(0);
+    expect(oneMissing.stderr).toContain("no definition nowhere in src/Main.bend");
   }, 900_000);
 
   test("C from a restored state: a module's foreign C names its own module's ids", () => {

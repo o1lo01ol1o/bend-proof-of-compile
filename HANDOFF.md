@@ -80,15 +80,16 @@ acceptance histories against the fork's CLI) and the install check.
   `Found N errors.` (`book_err`'s `at` places the lines, so poc and
   `bend --check-only` still agree byte for byte). Parse errors still stop at
   the first.
-- **`poc unreached [--module] FILE DEF DIR`** checks FILE as `poc check`
+- **`poc unreached [--module] FILE DEF[,DEF...] DIR`** checks FILE as `poc check`
   does (through the cache, whatever the verdict: holes, `@unsafe` and
   foreign code are fine), then lists the definitions in the `.bend` files
-  under DIR that DEF does not reach, the files there FILE never loads, and,
+  under DIR that the DEFs do not reach, the files there FILE never loads, and,
   apart, what only laws about reached code keep alive. The reach follows each
   record's stored references (`src/unreached.ts`), so it sees what
   elaboration resolved and raises no record: on the suite's Trading plugin
   (451 definitions) it is 103 s cold and 1.3 s warm. A program with several
-  entry points (a plugin's `main` and `start`) needs one run per entry.
+  roots names them all, comma-separated (a plugin's `effect,plugin,start`):
+  what any of them reaches is reached.
 - **Composition as derivations** (`nix/composition.nix`, `lib.composition
   { pkgs, poc }`). `chain` makes one derivation per region of a load order:
   each checks a synthetic entry importing the hub modules of every region up

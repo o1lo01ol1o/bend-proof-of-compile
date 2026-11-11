@@ -6,8 +6,9 @@ import type { BookLike, CompilerRuntime, LoadStep } from "./compiler.ts";
 import { PocError } from "./error.ts";
 
 // `poc unreached`: the definitions in the .bend files under a directory that
-// one def of a checked state does not reach, and the files there its load
-// order never loads.
+// the given defs of a checked state (one, or a comma-separated list: a
+// program's roots) do not reach, and the files there its load order never
+// loads.
 //
 // The reach follows each record's stored references (the names its type and
 // elaboration refer to, as the checker's report reads them), so it sees what
@@ -37,10 +38,14 @@ export function unreachedReport(
   const base = (name: string): boolean => summary(template(name))?.base !== false;
   const law = (name: string): boolean => summary(name)?.law === true;
 
-  const key = keyOf(book, entry.namespace, start);
-  if (key === undefined) {
-    throw new PocError("CLI_USAGE", `no definition ${start} in ${shown(entry.path)}`);
-  }
+  const starts = start.split(",").map((name) => name.trim());
+  const keys = starts.map((name) => {
+    const key = name === "" ? undefined : keyOf(book, entry.namespace, name);
+    if (key === undefined) {
+      throw new PocError("CLI_USAGE", `no definition ${name} in ${shown(entry.path)}`);
+    }
+    return key;
+  });
 
   // Each name's file, by its namespace (a bare name is in a file loaded
   // under "": Base's are Base records, the rest the entry's).
@@ -68,7 +73,7 @@ export function unreachedReport(
   };
 
   const reached = new Set<string>();
-  closure([key], reached, new Set());
+  closure(keys, reached, new Set());
 
   // Laws kept by the reached code, to a fixpoint.
   const own = [...new Set(book.order)].filter((name) => !base(name));
@@ -118,7 +123,7 @@ export function unreachedReport(
   const unloaded = [...under].filter((file) => !loaded.has(file)).sort();
 
   const lines = [
-    `unreached from ${start}: ${unreached.length} of ${defined.length} definitions under ${shown(root)}`,
+    `unreached from ${starts.join(", ")}: ${unreached.length} of ${defined.length} definitions under ${shown(root)}`,
     ...byFile(unreached, () => ""),
   ];
   if (unloaded.length > 0) {
