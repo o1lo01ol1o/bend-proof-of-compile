@@ -18,7 +18,11 @@ import type {
 import { StoredTerms, TermTable } from "./term-table.ts";
 import { PocError } from "./error.ts";
 
-const PACK_SCHEMA = 9;
+// The wire format of packs. It is one of the compiler's named inputs
+// (host-preload.ts compilerInputs), so every key moves with it: a store
+// that holds packs of another schema reads them as misses and never meets
+// a new pack under an old one's key.
+export const PACK_SCHEMA = 9;
 
 const MAX_COMPRESSED_BYTES = 1_000_000_000;
 const MAX_UNCOMPRESSED_BYTES = 2_000_000_000;

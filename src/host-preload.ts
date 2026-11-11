@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { decodePack, encodePack, pathReal, type PackBytes } from "./codec.ts";
+import { decodePack, encodePack, PACK_SCHEMA, pathReal, type PackBytes } from "./codec.ts";
 import { unreachedReport } from "./unreached.ts";
 import {
   CAS_SCHEMA,
@@ -147,8 +147,13 @@ globalThis.POC_HOST = {
   },
 
   compilerInputs() {
+    // The compiler is its sources and the format its states are stored in:
+    // a state of one pack schema is never keyed like one of another.
     memoizedInputs ??= {
-      compiler: immutableIdentityOrTree(bend2Source),
+      compiler: [
+        ...immutableIdentityOrTree(bend2Source),
+        { path: "proof-of-compile/pack-schema", bytes: Buffer.from(String(PACK_SCHEMA), "utf8").toString("base64") },
+      ],
       hashes: immutableIdentityOrTree(hashesSource),
     };
     return memoizedInputs;
