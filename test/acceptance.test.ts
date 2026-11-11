@@ -497,6 +497,10 @@ src/Lib.bend
     expect(roots.code).toBe(0);
     expect(roots.stdout).toStartWith("unreached from main, spare: 3 of 12 definitions under src\n");
     expect(roots.stdout).not.toContain("def spare");
+    // The working directory itself is ".".
+    const here = h.poc(["unreached", "src/Main.bend", "main", "."]);
+    expect(here.code).toBe(0);
+    expect(here.stdout).toStartWith("unreached from main: 4 of 12 definitions under .\n");
     // As a module, the def is spelled as the module spells it.
     const module = h.poc(["unreached", "--module", "src/Lib.bend", "double", "src"]);
     expect(module.code).toBe(0);

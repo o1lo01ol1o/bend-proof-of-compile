@@ -203,7 +203,12 @@ function bendFilesUnder(root: string): Set<string> {
   return out;
 }
 
+// A path as the report prints it: relative to the working directory when
+// inside it ("." for the directory itself), else as given.
 function shown(file: string): string {
   const relative = path.relative(process.cwd(), file);
-  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : file;
+  if (relative === "") {
+    return ".";
+  }
+  return !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : file;
 }
